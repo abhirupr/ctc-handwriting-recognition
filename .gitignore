@@ -10,6 +10,7 @@ venv/
 build/
 .venv/
 dist/
+ctcdcode/
 .eggs/
 *.egg-info/
 
