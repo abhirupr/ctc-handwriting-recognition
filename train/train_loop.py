@@ -9,8 +9,10 @@ from utils.label_converter import LabelConverter
 def collate_fn(batch):
     images, labels = zip(*batch)
     images = torch.stack(images)
-    lengths = torch.tensor([len(l) for l in labels])
-    return images, labels, lengths
+    label_tensors = [torch.tensor(l, dtype=torch.long) for l in labels]
+    labels_padded = pad_sequence(label_tensors, batch_first=True, padding_value=0)
+    label_lengths = torch.tensor([len(l) for l in labels], dtype=torch.long)
+    return images, labels_padded, label_lengths
 
 def train(model, dataloader, converter, device, epochs=10):
     model.to(device)
