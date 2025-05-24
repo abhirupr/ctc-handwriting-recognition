@@ -2,7 +2,7 @@ import torch
 
 # Dataset configuration
 DATA_DIR = "data/iam_dataset/lines"
-XML_PATH = "data/iam_dataset/xml"  # Point to the xml directory, not a specific file
+XML_PATH = "data/iam_dataset/xml"  
 VOCAB = (
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -15,22 +15,22 @@ TEST_SIZE = 0.2  # Fraction of the dataset to use for testing
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Training configuration
-EPOCHS = 20  # More epochs for better learning
-LEARNING_RATE = 0.001  # Keep current LR
-BATCH_SIZE = 8  # Keep current batch size
-OPTIMIZER = "adam"  # Keep Adam
-EVAL_STEP = 1  # Evaluate every epoch
-EVAL_STRATEGY = "loss"  # Change to loss-based evaluation
+# Training configuration - SINGLE SET OF VALUES
+EPOCHS = 30  
+LEARNING_RATE = 0.0005  
+BATCH_SIZE = 12  
+OPTIMIZER = "adam"  
+EVAL_STEP = 1  
+EVAL_STRATEGY = "loss"  
 
 # Learning rate scheduling
 USE_LR_SCHEDULER = True
-LR_SCHEDULER_STEP_SIZE = 5  # Reduce LR every 5 epochs
-LR_SCHEDULER_GAMMA = 0.7  # More gradual reduction
+LR_SCHEDULER_STEP_SIZE = 5  
+LR_SCHEDULER_GAMMA = 0.7  
 
 # Model saving configuration
-SAVE_DIR = "resources/checkpoints"  # Directory for saving checkpoints
-SAVE_LIMIT = 5  # Maximum number of checkpoints to keep
+SAVE_DIR = "resources/checkpoints"  
+SAVE_LIMIT = 5  
 BEST_MODEL_DIR = "resources/best_model"
 BEST_MODEL_NAME = "best_model.pth"
 CHECKPOINT_PREFIX = "model_epoch"
@@ -38,9 +38,9 @@ CHECKPOINT_PREFIX = "model_epoch"
 # Early Stopping Configuration - CER-based
 EARLY_STOPPING = {
     "enabled": True,
-    "patience": 8,          # Reasonable patience
-    "min_delta": 1.0,       # 1% CER improvement required
-    "mode": "min",          # "min" for CER (lower is better)
+    "patience": 8,          
+    "min_delta": 1.0,       
+    "mode": "min",          
     "restore_best_weights": True,
     "baseline": None,
     "verbose": True
@@ -61,7 +61,19 @@ LM_BETA = 1.0
 BEAM_WIDTH = 100
 
 # Debugging configuration
-DEBUG_MODE = False  # Disable debug output
+DEBUG_MODE = False  
+
+# Data augmentation
+DATA_AUGMENTATION = {
+    "rotation": 2.0,
+    "shear": 0.1,
+    "elastic_transform": True,
+    "noise": 0.02
+}
+
+# Regularization
+DROPOUT_RATE = 0.4  
+WEIGHT_DECAY = 1e-4  
 
 # Create necessary directories
 import os
