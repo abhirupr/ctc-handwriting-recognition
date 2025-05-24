@@ -7,11 +7,19 @@ from models.rtlr_model import CTCRecognitionModel
 from utils.label_converter import LabelConverter
 from train.train_loop import train
 from config import DATA_DIR, XML_PATH, VOCAB, BATCH_SIZE, EPOCHS, DEVICE, LEARNING_RATE, OPTIMIZER, MODEL_CONFIG
+from sklearn.model_selection import train_test_split
 
 # Setup dataset and dataloader
 dataset = IAMDataset(DATA_DIR, XML_PATH)
 converter = LabelConverter(VOCAB)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: (zip(*b)))
+
+# Split dataset into train and validation sets
+train_samples, val_samples = train_test_split(dataset.samples, test_size=TEST_SIZE, random_state=42)
+train_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=train_samples)
+val_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=val_samples)
+
+train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
 # Initialize model
 model = CTCRecognitionModel(**MODEL_CONFIG)
@@ -25,4 +33,4 @@ else:
     raise ValueError(f"Unsupported optimizer: {OPTIMIZER}")
 
 # Train the model
-train(model, dataloader, converter, DEVICE, optimizer, epochs=EPOCHS)
+train(model, train_dataloader, val_dataloader, converter, DEVICE, optimizer, config)
