@@ -8,3 +8,4 @@ tqdm
 lxml
 editdistance
 joblib
+scikit-learn
