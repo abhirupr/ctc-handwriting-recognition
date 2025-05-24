@@ -49,26 +49,30 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     if len(encoded) == 0:
                         continue  # Skip empty labels
                     
-                    # Ensure proper tensor creation for CTC loss
-                    # CTC expects targets as a 1D tensor, not 2D
+                    # Create label tensor properly for CTC loss
+                    # Always create a new tensor to avoid gradient issues
                     if isinstance(encoded, torch.Tensor):
-                        # If it's already a tensor, detach it and ensure it's on CPU first
-                        labels_flat = encoded.detach().cpu()
-                        if labels_flat.dim() > 1:
-                            labels_flat = labels_flat.flatten()
-                        labels_tensor = labels_flat.to(device).long()
+                        # Convert to numpy first, then back to tensor to break any grad connections
+                        labels_np = encoded.detach().cpu().numpy()
+                        labels_tensor = torch.from_numpy(labels_np).long().to(device)
                     else:
-                        # If it's a list, convert to tensor
+                        # If it's a list or numpy array
                         labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
                     
                     # Ensure labels_tensor is 1D
                     if labels_tensor.dim() > 1:
                         labels_tensor = labels_tensor.flatten()
                     
+                    # Create length tensors
                     label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
                     
                     # Forward pass through model (handles chunking internally)
                     logits = model(img)  # (1, T, V+1) where T depends on image width
+                    
+                    # Ensure logits require grad (should be automatic from model)
+                    if not logits.requires_grad:
+                        print(f"Warning: Model output doesn't require grad in batch {batch_idx}, sample {img_idx}")
+                        continue
                     
                     # CTC expects log probabilities in (T, B, V+1) format
                     log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
@@ -76,9 +80,14 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     # Input lengths (sequence length for the single image)
                     input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
                     
+                    # Validate tensor shapes before CTC loss
+                    if log_probs.size(0) == 0 or labels_tensor.size(0) == 0:
+                        print(f"Empty sequence detected in batch {batch_idx}, sample {img_idx}")
+                        continue
+                    
                     # Calculate CTC loss
                     # Note: CTC loss expects:
-                    # - log_probs: (T, B, C) - log probabilities
+                    # - log_probs: (T, B, C) - log probabilities  
                     # - targets: (sum of target lengths) - concatenated targets
                     # - input_lengths: (B,) - lengths of inputs
                     # - target_lengths: (B,) - lengths of targets
@@ -93,6 +102,14 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     loss.backward()
                     batch_losses.append(loss.item())
                     
+                except RuntimeError as e:
+                    if "grad" in str(e).lower():
+                        print(f"Gradient error in sample {img_idx}, batch {batch_idx}: {e}")
+                        # Try to recover by skipping this sample
+                        continue
+                    else:
+                        print(f"Runtime error processing sample {img_idx} in batch {batch_idx}: {e}")
+                        continue
                 except Exception as e:
                     print(f"Error processing sample {img_idx} in batch {batch_idx}: {e}")
                     # Print more debug info for the first few errors
@@ -109,6 +126,8 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
             
             # Update weights after processing all images in the batch
             if batch_losses:
+                # Add gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 avg_batch_loss = sum(batch_losses) / len(batch_losses)
                 total_loss += avg_batch_loss
@@ -116,6 +135,8 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                 
                 if batch_idx % 10 == 0:  # Print every 10 batches
                     print(f"Epoch {epoch+1}/{config.EPOCHS}, Batch {batch_idx}, Avg Loss: {avg_batch_loss:.4f}, Processed: {len(batch_losses)}/{len(images)}")
+            else:
+                print(f"No valid samples in batch {batch_idx}")
         
         avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
         print(f"Epoch {epoch+1}/{config.EPOCHS} - Average Loss: {avg_loss:.4f}")
@@ -166,12 +187,10 @@ def evaluate_model(model, dataloader, converter, criterion, device):
                     if len(encoded) == 0:
                         continue
                     
-                    # Ensure proper tensor creation
+                    # Create label tensor properly
                     if isinstance(encoded, torch.Tensor):
-                        labels_flat = encoded.detach().cpu()
-                        if labels_flat.dim() > 1:
-                            labels_flat = labels_flat.flatten()
-                        labels_tensor = labels_flat.to(device).long()
+                        labels_np = encoded.detach().cpu().numpy()
+                        labels_tensor = torch.from_numpy(labels_np).long().to(device)
                     else:
                         labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
                     
