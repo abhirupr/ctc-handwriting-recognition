@@ -90,6 +90,7 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                         continue
                     
                     # CTC expects log probabilities in (T, B, V+1) format
+                    # Apply log_softmax in the training code instead of the model
                     log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
                     
                     # Input lengths (sequence length for the single image)

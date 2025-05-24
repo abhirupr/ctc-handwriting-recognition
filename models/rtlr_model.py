@@ -8,19 +8,18 @@ from ctcdecode import CTCBeamDecoder
 
 # ----- Positional Encoding -----
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=1000):
+    def __init__(self, d_model, max_len=5000):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        pe = pe.unsqueeze(0).transpose(0, 1)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
-
+        return x + self.pe[:x.size(0), :]
 
 # ----- CNN Backbone with Space-to-Depth -----
 class CNNBackbone(nn.Module):
@@ -48,28 +47,24 @@ class CNNBackbone(nn.Module):
                 nn.BatchNorm2d(64),
                 nn.ReLU6(inplace=True),
             )
-
         self.fused_blocks = nn.Sequential(*[repeat_block() for _ in range(10)])
 
         # Final block: reduce height to 1 and project to 256 channels
         self.final_conv = nn.Sequential(
-            nn.Conv2d(64, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
+            nn.Conv2d(64, 256, kernel_size=(10, 1), padding=0),  # Reduce height to 1
+            nn.BatchNorm2d(256),
             nn.ReLU6(inplace=True),
-            nn.Conv2d(512, 256, kernel_size=(1, 1)),
         )
 
     def forward(self, x):
-        x = self.s2d(x)
-        x = self.init_block(x)
-        x = self.fused_blocks(x)
-        x = self.final_conv(x)
-        # Perform global average pooling over the height dimension
-        x = F.adaptive_avg_pool2d(x, (1, x.size(3)))
-        x = x.squeeze(2)         # (N, 256, 1, W) → (N, 256, W)
-        x = x.permute(0, 2, 1)   # (N, 256, W) → (N, W, 256)
+        # x: (B, C, H, W)
+        x = self.s2d(x)          # (B, 16*C, H/4, W/4)
+        x = self.init_block(x)   # (B, 64, H/4, W/4)
+        x = self.fused_blocks(x) # (B, 64, H/4, W/4)
+        x = self.final_conv(x)   # (B, 256, 1, W/4)
+        x = x.squeeze(2)         # (B, 256, W/4)
+        x = x.permute(0, 2, 1)   # (B, W/4, 256)
         return x
-
 
 # ----- Transformer Encoder Block -----
 class TransformerEncoderBlock(nn.Module):
@@ -94,7 +89,6 @@ class TransformerEncoderBlock(nn.Module):
         x = x + self.dropout(self.ffn(x2))
         return x
 
-
 # ----- Transformer Encoder with 16 Layers -----
 class SelfAttentionEncoder(nn.Module):
     def __init__(self, d_model=256, num_layers=16, nhead=4, dim_feedforward=1024, dropout=0.1):
@@ -110,7 +104,6 @@ class SelfAttentionEncoder(nn.Module):
             x = layer(x, src_key_padding_mask)
         return x
 
-
 # ----- CTC Decoder Head -----
 class CTCDecoderHead(nn.Module):
     def __init__(self, d_model, vocab_size):
@@ -118,8 +111,9 @@ class CTCDecoderHead(nn.Module):
         self.output_layer = nn.Linear(d_model, vocab_size + 1)  # +1 for blank
 
     def forward(self, x):
-        return F.log_softmax(self.output_layer(x), dim=-1)  # (B, T, V+1)
-
+        # CRITICAL FIX: Return raw logits, not log_softmax
+        # Let the loss function handle the softmax/log_softmax
+        return self.output_layer(x)  # (B, T, V+1) - raw logits
 
 # ----- Full Model -----    
 class CTCRecognitionModel(nn.Module):
@@ -176,131 +170,123 @@ class CTCRecognitionModel(nn.Module):
             # Handle edge case where no valid features were extracted
             return torch.zeros(B, 1, self.ctc_head.output_layer.out_features, device=img.device)
 
-
 # ----- PyctcDecode CTC Beam Decoder Wrapper (for inference) -----
 class PyCTCBeamDecoder:
-    def __init__(self,
-                 vocab: List[str],
-                 lm_path: Optional[str] = None,
-                 alpha: float = 0.5,
-                 beta: float = 1.0,
-                 beam_width: int = 100,
-                 n_jobs: int = -1):
-        """
-        Initializes the PyCTCBeamDecoder.
+    def __init__(self, labels, model_path=None, alpha=0.5, beta=1.0, cutoff_top_n=40, cutoff_prob=1.0, beam_width=100, num_processes=4, blank_id=0, log_probs_input=False):
+        try:
+            # Try to initialize CTCBeamDecoder
+            self.decoder = CTCBeamDecoder(labels, model_path, alpha, beta, cutoff_top_n, cutoff_prob, beam_width, num_processes, blank_id, log_probs_input)
+            self.available = True
+        except Exception as e:
+            print(f"CTCBeamDecoder not available: {e}")
+            self.decoder = None
+            self.available = False
+            self.labels = labels
+            self.blank_id = blank_id
 
-        Args:
-            vocab (List[str]): List of characters in the vocabulary.
-            lm_path (Optional[str]): Path to KenLM language model.
-            alpha (float): Weight for language model.
-            beta (float): Weight for word insertion.
-            beam_width (int): Width of the beam search.
-            n_jobs (int): Number of parallel jobs (default: -1 for all cores).
-        """
-        self.vocab = vocab
-        self.decoder = BeamSearchDecoderCTC(vocab, kenlm_model_path=lm_path)
-        self.alpha = alpha
-        self.beta = beta
-        self.beam_width = beam_width
-        self.n_jobs = n_jobs
+    def decode(self, probs, seq_lens=None):
+        if self.available and self.decoder:
+            beam_results, beam_scores, timesteps, out_seq_len = self.decoder.decode(probs, seq_lens)
+            return beam_results, beam_scores, timesteps, out_seq_len
+        else:
+            # Fallback to greedy decoding if beam search is not available
+            return self._greedy_decode(probs, seq_lens)
 
-    def _decode_single(self, log_prob: np.ndarray) -> str:
-        """
-        Decodes a single log-probability tensor.
-
-        Args:
-            log_prob (np.ndarray): Log probability array of shape (T, C).
-
-        Returns:
-            str: Decoded output string.
-        """
-        return self.decoder.decode_beams(log_prob,
-                                         beam_width=self.beam_width,
-                                         alpha=self.alpha,
-                                         beta=self.beta)[0][0]
-
-    def decode(self, log_probs: torch.Tensor, input_lengths: torch.Tensor) -> List[str]:
-        """
-        Decodes a batch of log-probability tensors.
-
-        Args:
-            log_probs (torch.Tensor): Log probabilities (B, T, C).
-            input_lengths (torch.Tensor): Actual sequence lengths (B).
-
-        Returns:
-            List[str]: List of decoded strings.
-        """
-        log_probs = log_probs.detach().cpu().numpy()
-        input_lengths = input_lengths.cpu().numpy()
-        sequences = [log_probs[i, :input_lengths[i]] for i in range(log_probs.shape[0])]
-        return Parallel(n_jobs=self.n_jobs)(delayed(self._decode_single)(seq) for seq in sequences)
-
+    def _greedy_decode(self, probs, seq_lens=None):
+        # Simple greedy decoding as fallback
+        if len(probs.shape) == 3:
+            batch_size, max_len, _ = probs.shape
+            batch_results = []
+            for b in range(batch_size):
+                seq_len = seq_lens[b] if seq_lens is not None else max_len
+                # Get the most probable character at each time step
+                indices = torch.argmax(probs[b, :seq_len], dim=-1)
+                # Remove blanks and consecutive duplicates
+                decoded = []
+                prev = None
+                for idx in indices:
+                    if idx != self.blank_id and idx != prev:
+                        decoded.append(idx.item())
+                    prev = idx
+                batch_results.append(decoded)
+            return batch_results, None, None, None
+        else:
+            raise ValueError("Expected 3D tensor for probs")
 
 class CTCDecoder(nn.Module):
-    def __init__(self, input_dim: int, vocab_size: int):
-        """
-        CTC decoder head with linear projection.
+    def __init__(self, labels, beam_width=10, blank_id=0):
+        super().__init__()
+        self.labels = labels
+        self.beam_width = beam_width
+        self.blank_id = blank_id
+        self.beam_decoder = PyCTCBeamDecoder(labels, beam_width=beam_width, blank_id=blank_id)
 
-        Args:
-            input_dim (int): Dimension of input features.
-            vocab_size (int): Number of output classes.
-        """
-        super(CTCDecoder, self).__init__()
-        self.fc = nn.Linear(input_dim, vocab_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for the decoder.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, T, input_dim).
-
-        Returns:
-            torch.Tensor: Log probabilities (B, T, vocab_size).
-        """
-        x = self.fc(x)
-        return F.log_softmax(x, dim=-1)
-
+    def decode(self, log_probs):
+        # Convert log probabilities to probabilities
+        probs = torch.exp(log_probs)
+        seq_lens = torch.full((probs.size(0),), probs.size(1), dtype=torch.long)
+        
+        beam_results, beam_scores, timesteps, out_seq_len = self.beam_decoder.decode(probs, seq_lens)
+        
+        # Convert results to strings
+        decoded_strings = []
+        if beam_results is not None:
+            for beam_result in beam_results:
+                # Take the best beam (first one)
+                indices = beam_result[0][:out_seq_len[0][0]]
+                decoded_string = ''.join([self.labels[idx] for idx in indices if idx < len(self.labels)])
+                decoded_strings.append(decoded_string)
+        else:
+            # Fallback to simple greedy decoding
+            for prob in probs:
+                indices = torch.argmax(prob, dim=-1)
+                decoded = []
+                prev = None
+                for idx in indices:
+                    if idx != self.blank_id and idx != prev:
+                        if idx < len(self.labels):
+                            decoded.append(self.labels[idx])
+                    prev = idx
+                decoded_strings.append(''.join(decoded))
+        
+        return decoded_strings
 
 class CTCBeamDecoderWrapper:
-    def __init__(self, vocab, beam_width=100, lm_path=None, alpha=0.5, beta=1.0):
-        """
-        Wrapper for ctcdecode's CTCBeamDecoder.
-
-        Args:
-            vocab (list): List of characters in the vocabulary.
-            beam_width (int): Beam width for decoding.
-            lm_path (str): Path to the language model (optional).
-            alpha (float): Weight for the language model.
-            beta (float): Weight for word insertion.
-        """
+    def __init__(self, vocab, beam_width=10):
         self.vocab = vocab
-        self.decoder = CTCBeamDecoder(
-            labels=vocab,
-            model_path=lm_path,
-            alpha=alpha,
-            beta=beta,
-            beam_width=beam_width,
-            num_processes=4,  # Number of parallel processes
-            blank_id=0,  # CTC blank index
-        )
-
-    def decode(self, log_probs, input_lengths):
+        self.beam_width = beam_width
+        self.blank_id = 0  # Assuming blank is at index 0
+        
+    def decode(self, log_probs_batch):
         """
-        Decodes a batch of log-probability tensors.
-
+        Decode batch of log probabilities to text
+        
         Args:
-            log_probs (torch.Tensor): Log probabilities (B, T, C).
-            input_lengths (torch.Tensor): Actual sequence lengths (B).
-
+            log_probs_batch: torch.Tensor of shape (B, T, V+1) with log probabilities
+            
         Returns:
-            list: List of decoded strings.
+            List of decoded strings
         """
-        beam_results, _, _, out_lens = self.decoder.decode(log_probs, seq_lens=input_lengths)
-        decoded_strings = []
-        for i in range(len(beam_results)):
-            decoded = "".join(
-                [self.vocab[idx] for idx in beam_results[i][0][: out_lens[i][0]]]
-            )
-            decoded_strings.append(decoded)
-        return decoded_strings
+        batch_size = log_probs_batch.size(0)
+        decoded_texts = []
+        
+        for b in range(batch_size):
+            log_probs = log_probs_batch[b]  # (T, V+1)
+            
+            # Greedy decoding (can be replaced with beam search later)
+            pred_indices = torch.argmax(log_probs, dim=-1)  # (T,)
+            
+            # Remove consecutive duplicates and blanks
+            decoded_sequence = []
+            prev_idx = None
+            
+            for idx in pred_indices:
+                idx = idx.item()
+                if idx != self.blank_id and idx != prev_idx:
+                    if idx > 0 and idx <= len(self.vocab):  # Valid character index
+                        decoded_sequence.append(self.vocab[idx-1])  # -1 because blank is at 0
+                prev_idx = idx
+            
+            decoded_texts.append(''.join(decoded_sequence))
+        
+        return decoded_texts
