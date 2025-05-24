@@ -35,3 +35,10 @@ MODEL_CONFIG = {
     "chunk_width": 320,
     "pad": 32,
 }
+
+# Language Model Configuration
+USE_LANGUAGE_MODEL = True  # Enable language model
+LM_MODEL_PATH = "model.binary"  # Path to your built language model
+LM_ALPHA = 0.5  # Language model weight (tune this)
+LM_BETA = 1.0   # Word insertion penalty (tune this)
+BEAM_WIDTH = 100  # Beam search width
