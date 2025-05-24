@@ -5,6 +5,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from models.rtlr_model import CTCRecognitionModel
 from utils.label_converter import LabelConverter
+import os
 
 def collate_fn(batch):
     images, labels = zip(*batch)
@@ -14,9 +15,12 @@ def collate_fn(batch):
     label_lengths = torch.tensor([len(l) for l in labels], dtype=torch.long)
     return images, labels_padded, label_lengths
 
-def train(model, dataloader, converter, device, optimizer, epochs=10):
+def train(model, dataloader, converter, device, optimizer, epochs=10, save_dir="resources/checkpoints"):
     model.to(device)
     criterion = nn.CTCLoss(blank=converter.blank_idx, zero_infinity=True)
+
+    # Create directory for saving models
+    os.makedirs(save_dir, exist_ok=True)
 
     for epoch in range(epochs):
         model.train()
@@ -37,4 +41,10 @@ def train(model, dataloader, converter, device, optimizer, epochs=10):
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+
         print(f"Epoch {epoch + 1}, Loss: {epoch_loss:.4f}")
+
+        # Save model checkpoint
+        checkpoint_path = os.path.join(save_dir, f"model_epoch_{epoch + 1}.pth")
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"Model saved to {checkpoint_path}")
