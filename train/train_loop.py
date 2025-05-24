@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from models.rtlr_model import CTCRecognitionModel
+from models.rtlr_model import CTCBeamDecoderWrapper
 from utils.label_converter import LabelConverter
 import os
 
@@ -58,7 +59,7 @@ def train(
 
         # Save the best model
         if epoch % config.EVAL_STEP == 0:
-            val_metric = evaluate(model, val_dataloader, criterion, device, config)
+            val_metric = evaluate(model, val_dataloader, criterion, device, config, converter)
             print(f"Validation {config.EVAL_STRATEGY}: {val_metric:.4f}")
 
             if (
@@ -86,11 +87,14 @@ def train(
                 print(f"Removed old checkpoint: {oldest_checkpoint}")
 
 
-def evaluate(model, dataloader, criterion, device, config):
+def evaluate(model, dataloader, criterion, device, config, converter):
     model.eval()
     total_loss = 0
     total_correct = 0
     total_samples = 0
+
+    # Initialize the CTCBeamDecoderWrapper
+    decoder = CTCBeamDecoderWrapper(converter.vocab)
 
     with torch.no_grad():
         for images, labels_padded, label_lengths in dataloader:
@@ -108,11 +112,10 @@ def evaluate(model, dataloader, criterion, device, config):
             total_loss += loss.item()
 
             if config.EVAL_STRATEGY == "accuracy":
-                predictions = log_probs.argmax(dim=-1).permute(1, 0)  # (N, T)
-                for pred, label in zip(predictions, labels_padded):
-                    pred_text = converter.decode(pred.tolist())
+                decoded_strings = decoder.decode(log_probs, input_lengths)
+                for pred, label in zip(decoded_strings, labels_padded):
                     label_text = converter.decode(label.tolist())
-                    if pred_text == label_text:
+                    if pred == label_text:
                         total_correct += 1
                     total_samples += 1
 
