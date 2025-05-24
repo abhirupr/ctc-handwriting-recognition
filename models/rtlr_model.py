@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional
 from joblib import Parallel, delayed
-from pyctcdecode import BeamSearchDecoderCTC
+from ctcdecode import CTCBeamDecoder
 
 # ----- Positional Encoding -----
 class PositionalEncoding(nn.Module):
@@ -260,3 +260,47 @@ class CTCDecoder(nn.Module):
         """
         x = self.fc(x)
         return F.log_softmax(x, dim=-1)
+
+
+class CTCBeamDecoderWrapper:
+    def __init__(self, vocab, beam_width=100, lm_path=None, alpha=0.5, beta=1.0):
+        """
+        Wrapper for ctcdecode's CTCBeamDecoder.
+
+        Args:
+            vocab (list): List of characters in the vocabulary.
+            beam_width (int): Beam width for decoding.
+            lm_path (str): Path to the language model (optional).
+            alpha (float): Weight for the language model.
+            beta (float): Weight for word insertion.
+        """
+        self.vocab = vocab
+        self.decoder = CTCBeamDecoder(
+            labels=vocab,
+            model_path=lm_path,
+            alpha=alpha,
+            beta=beta,
+            beam_width=beam_width,
+            num_processes=4,  # Number of parallel processes
+            blank_id=0,  # CTC blank index
+        )
+
+    def decode(self, log_probs, input_lengths):
+        """
+        Decodes a batch of log-probability tensors.
+
+        Args:
+            log_probs (torch.Tensor): Log probabilities (B, T, C).
+            input_lengths (torch.Tensor): Actual sequence lengths (B).
+
+        Returns:
+            list: List of decoded strings.
+        """
+        beam_results, _, _, out_lens = self.decoder.decode(log_probs, seq_lens=input_lengths)
+        decoded_strings = []
+        for i in range(len(beam_results)):
+            decoded = "".join(
+                [self.vocab[idx] for idx in beam_results[i][0][: out_lens[i][0]]]
+            )
+            decoded_strings.append(decoded)
+        return decoded_strings
