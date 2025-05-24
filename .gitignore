@@ -15,6 +15,7 @@ data/
 .eggs/
 *.egg-info/
 resources/
+kenlm/
 
 # PyInstaller
 *.spec
