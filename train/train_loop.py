@@ -14,9 +14,8 @@ def collate_fn(batch):
     label_lengths = torch.tensor([len(l) for l in labels], dtype=torch.long)
     return images, labels_padded, label_lengths
 
-def train(model, dataloader, converter, device, epochs=10):
+def train(model, dataloader, converter, device, optimizer, epochs=10):
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
     criterion = nn.CTCLoss(blank=converter.blank_idx, zero_infinity=True)
 
     for epoch in range(epochs):
