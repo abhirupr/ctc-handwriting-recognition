@@ -173,6 +173,16 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                     print(f"Warning: Model output missing gradients in batch {batch_idx}, sample {img_idx}")
                     continue
                 
+                # Validate input/label alignment
+                if logits.size(1) < len(labels_tensor):
+                    print(f"⚠️ Sequence too long: input_len={logits.size(1)}, target_len={len(labels_tensor)}")
+                    continue
+
+                # Also add minimum sequence length check
+                if logits.size(1) < 2:  # CTC needs at least 2 time steps
+                    print(f"⚠️ Sequence too short: {logits.size(1)} time steps")
+                    continue
+                
                 # CTC Loss
                 log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
                 input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
