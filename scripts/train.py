@@ -5,9 +5,6 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-import torch
-from torch.utils.data import DataLoader
-from torch.optim import SGD, AdamW
 from dataset.iam_dataset import IAMDataset
 from models.rtlr_model import CTCRecognitionModel
 from utils.label_converter import LabelConverter
