@@ -15,7 +15,7 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     for param in model.parameters():
         param.requires_grad = True
     
-    criterion = nn.CTCLoss(blank=0, zero_infinity=True)
+    criterion = nn.CTCLoss(blank=0, zero_infinity=True, reduction='mean')
     
     # Create directories for saving models
     os.makedirs(config.SAVE_DIR, exist_ok=True)
