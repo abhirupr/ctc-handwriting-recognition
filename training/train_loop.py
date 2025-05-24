@@ -50,6 +50,12 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     print(f"Model parameters requiring gradients: {grad_params}/{total_params}")
     print("-" * 80)
     
+    # Debug: Check first batch
+    print("\n🔍 Initial model debugging...")
+    first_batch = next(iter(train_dataloader))
+    from .debug_helpers import debug_model_output, check_convergence_issues
+    debug_model_output(model, first_batch, converter, device)
+    
     training_start_time = time.time()
     
     for epoch in range(config.EPOCHS):
@@ -222,6 +228,12 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
     else:
         train_cer = 100.0
         train_accuracy = 0.0
+    
+    # Debug: Check model after each epoch
+    if epoch % 5 == 0:  # Every 5 epochs
+        print(f"\n🔍 Debug after epoch {epoch + 1}:")
+        check_convergence_issues(model)
+        debug_model_output(model, (images[:1], texts[:1], [len(texts[0])]), converter, device)
     
     return {
         'loss': avg_loss,
