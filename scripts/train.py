@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset.iam_dataset import IAMDataset
 from models.rtlr_model import CTCRecognitionModel
 from utils.label_converter import LabelConverter
-from train.train_loop import train_model, collate_fn  # Updated import
+from training.train_loop import train_model, collate_fn  # Updated import path
 from config import DATA_DIR, XML_PATH, VOCAB, BATCH_SIZE, EPOCHS, DEVICE, LEARNING_RATE, OPTIMIZER, MODEL_CONFIG, TEST_SIZE
 from sklearn.model_selection import train_test_split
 import config
@@ -39,4 +39,4 @@ else:
     raise ValueError(f"Unsupported optimizer: {OPTIMIZER}")
 
 # Train the model
-train_model(model, train_dataloader, val_dataloader, converter, DEVICE, optimizer, config)  # Updated function call
+train_model(model, train_dataloader, val_dataloader, converter, DEVICE, optimizer, config)
