@@ -5,9 +5,10 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, List
 import time
 from .metrics import calculate_cer, calculate_word_accuracy, calculate_sequence_accuracy, greedy_decode
+from .early_stopping import EarlyStopping
 
 def train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config):
-    """Main training function with comprehensive metrics"""
+    """Main training function with comprehensive metrics and early stopping"""
     model.to(device)
     
     # Ensure model parameters require gradients
@@ -23,16 +24,33 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     best_metric = 0.0 if config.EVAL_STRATEGY == "accuracy" else float('inf')
     saved_checkpoints = []
     
+    # Initialize early stopping
+    early_stopping = None
+    if hasattr(config, 'EARLY_STOPPING') and config.EARLY_STOPPING.get('enabled', False):
+        early_stopping_config = config.EARLY_STOPPING
+        early_stopping = EarlyStopping(
+            patience=early_stopping_config.get('patience', 7),
+            min_delta=early_stopping_config.get('min_delta', 0.0001),
+            restore_best_weights=early_stopping_config.get('restore_best_weights', True),
+            mode=early_stopping_config.get('mode', 'max'),
+            baseline=early_stopping_config.get('baseline', None),
+            verbose=early_stopping_config.get('verbose', True)
+        )
+        print(f"🎯 Early stopping enabled: patience={early_stopping.patience}, mode={early_stopping.mode}")
+    
     print(f"Starting training on {device}")
     print(f"Training samples: {len(train_dataloader.dataset)}")
     print(f"Validation samples: {len(val_dataloader.dataset)}")
     print(f"Evaluation strategy: {config.EVAL_STRATEGY}")
+    print(f"Maximum epochs: {config.EPOCHS}")
     
     # Debug: Check if model parameters require gradients
     grad_params = sum(p.requires_grad for p in model.parameters())
     total_params = sum(1 for _ in model.parameters())
     print(f"Model parameters requiring gradients: {grad_params}/{total_params}")
     print("-" * 80)
+    
+    training_start_time = time.time()
     
     for epoch in range(config.EPOCHS):
         epoch_start_time = time.time()
@@ -62,6 +80,27 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                 best_model_path = os.path.join(config.BEST_MODEL_DIR, config.BEST_MODEL_NAME)
                 torch.save(model.state_dict(), best_model_path)
                 print(f"✅ Best model saved! {config.EVAL_STRATEGY.capitalize()}: {best_metric:.4f}")
+            
+            # Check early stopping
+            if early_stopping is not None:
+                # Use the metric for early stopping (same as evaluation strategy)
+                early_stop_metric = current_metric
+                
+                should_stop = early_stopping(early_stop_metric, model)
+                if should_stop:
+                    print(f"\n🛑 Training stopped early at epoch {epoch + 1}")
+                    print(f"   Best {config.EVAL_STRATEGY}: {early_stopping.get_best_metric():.4f}")
+                    
+                    # Restore best weights if configured
+                    if early_stopping.restore_best_weights:
+                        early_stopping.restore_weights(model)
+                        
+                        # Also save the final restored model
+                        final_model_path = os.path.join(config.BEST_MODEL_DIR, "final_model_early_stopped.pth")
+                        torch.save(model.state_dict(), final_model_path)
+                        print(f"   Final model saved: {final_model_path}")
+                    
+                    break
         else:
             # Print training metrics only
             print_training_metrics(epoch + 1, config.EPOCHS, train_metrics, time.time() - epoch_start_time)
@@ -69,6 +108,20 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         # Save checkpoint
         save_checkpoint(model, optimizer, epoch, train_metrics['loss'], config, saved_checkpoints)
         print("-" * 80)
+    
+    # Training completed
+    total_training_time = time.time() - training_start_time
+    
+    if early_stopping is not None and early_stopping.wait < early_stopping.patience:
+        print(f"\n🎉 Training completed normally after {epoch + 1} epochs")
+        print(f"   Final {config.EVAL_STRATEGY}: {current_metric:.4f}")
+        print(f"   Best {config.EVAL_STRATEGY}: {early_stopping.get_best_metric():.4f}")
+    else:
+        print(f"\n🎉 Training completed after {config.EPOCHS} epochs")
+    
+    print(f"⏱️ Total training time: {total_training_time/3600:.1f} hours ({total_training_time/60:.1f} minutes)")
+    
+    return model
 
 def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoch: int, config) -> Dict[str, float]:
     """Train for one epoch and return metrics"""
