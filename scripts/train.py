@@ -1,20 +1,26 @@
 import sys
 import os
+import torch
 from torch.utils.data import DataLoader
 from torch.optim import SGD, AdamW
 
 # Add the project root directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
 from dataset.iam_dataset import IAMDataset
 from models.rtlr_model import CTCRecognitionModel
 from utils.label_converter import LabelConverter
 from training.train_loop import train_model
 from training.metrics import calculate_cer, calculate_word_accuracy
-from config import DATA_DIR, XML_PATH, VOCAB, BATCH_SIZE, EPOCHS, DEVICE, LEARNING_RATE, OPTIMIZER, MODEL_CONFIG, TEST_SIZE
+from config import (DATA_DIR, XML_PATH, VOCAB, BATCH_SIZE, EPOCHS, DEVICE, 
+                   LEARNING_RATE, OPTIMIZER, MODEL_CONFIG, TEST_SIZE)
 from sklearn.model_selection import train_test_split
 import config
+
+def collate_fn(batch):
+    """Custom collate function for IAM dataset"""
+    images, texts, lengths = zip(*batch)
+    return list(images), list(texts), list(lengths)
 
 # Setup dataset and dataloader
 dataset = IAMDataset(DATA_DIR, XML_PATH)
@@ -37,16 +43,21 @@ if OPTIMIZER == "sgd":
 elif OPTIMIZER == "adamw":
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
 else:
-    raise ValueError(f"Unsupported optimizer: {OPTIMIZER}")
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 # Train the model
 if __name__ == "__main__":
-    # Initialize everything as before
-    model = CTCRecognitionModel(vocab_size=config.MODEL_CONFIG["vocab_size"], 
-                               chunk_width=config.MODEL_CONFIG["chunk_width"],
-                               pad=config.MODEL_CONFIG["pad"])
+    device = torch.device(DEVICE)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
+    print("🚀 Starting training with early stopping...")
+    if hasattr(config, 'EARLY_STOPPING') and config.EARLY_STOPPING.get('enabled', False):
+        es_config = config.EARLY_STOPPING
+        print(f"   Patience: {es_config.get('patience', 7)} epochs")
+        print(f"   Min delta: {es_config.get('min_delta', 0.0001)}")
+        print(f"   Mode: {es_config.get('mode', 'max')}")
+        print(f"   Restore best weights: {es_config.get('restore_best_weights', True)}")
     
-    # Start training with comprehensive metrics
-    train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config)
+    # Start training with comprehensive metrics and early stopping
+    model = train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config)
+    
+    print("\n🎉 Training complete!")
