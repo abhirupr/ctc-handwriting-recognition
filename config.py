@@ -32,4 +32,12 @@ CHECKPOINT_PREFIX = "model_epoch"
 # Model configuration
 MODEL_CONFIG = {
     "vocab_size": len(VOCAB),
+    "img_channel": 1,
+    "cnn_out_channels": 256,
+    "num_encoder_layers": 16,
+    "num_heads": 8,
+    "d_model": 256,
+    "dim_feedforward": 512,
+    "chunk_width": 320,
+    "pad": 32,
 }
