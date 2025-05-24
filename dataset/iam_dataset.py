@@ -28,20 +28,16 @@ class IAMDataset(Dataset):
             xml_files = [f for f in os.listdir(xml_path) if f.endswith('.xml')]
             print(f"Found {len(xml_files)} XML files: {xml_files[:5]}...")  # Show first 5
             
-            # Debug: Parse first file to understand structure
-            if xml_files:
-                first_file = os.path.join(xml_path, xml_files[0])
-                print(f"Debugging first XML file: {first_file}")
-                self._debug_xml_structure(first_file)
-            
-            for xml_file in xml_files[:10]:  # Limit to first 10 files for debugging
+            for xml_file in xml_files:  # Process all files, not just first 10
                 file_path = os.path.join(xml_path, xml_file)
                 file_samples = self._parse_single_xml(file_path)
-                print(f"Parsed {len(file_samples)} samples from {xml_file}")
-                samples.extend(file_samples)
+                if file_samples:
+                    print(f"Parsed {len(file_samples)} samples from {xml_file}")
+                    samples.extend(file_samples)
                 
-                # Stop if we have enough samples for testing
-                if len(samples) >= 100:
+                # Stop early for debugging if we have enough samples
+                if len(samples) >= 1000:  # Increased limit for better training
+                    print(f"Stopping early after collecting {len(samples)} samples for debugging")
                     break
         else:
             # If it's a single file
@@ -50,72 +46,50 @@ class IAMDataset(Dataset):
         print(f"Total samples parsed: {len(samples)}")
         return samples
 
-    def _debug_xml_structure(self, xml_file_path):
-        """Debug function to understand XML structure"""
-        try:
-            tree = ET.parse(xml_file_path)
-            root = tree.getroot()
-            print(f"Root tag: {root.tag}")
-            print(f"Root attributes: {root.attrib}")
-            
-            # Print first few children
-            for i, child in enumerate(root):
-                if i < 3:  # Only show first 3 children
-                    print(f"Child {i}: tag={child.tag}, attrib={child.attrib}")
-                    # Check for nested elements
-                    for j, grandchild in enumerate(child):
-                        if j < 2:  # Only show first 2 grandchildren
-                            print(f"  Grandchild {j}: tag={grandchild.tag}, attrib={grandchild.attrib}")
-                            # Check for line elements
-                            for k, ggchild in enumerate(grandchild):
-                                if k < 2:
-                                    print(f"    GGChild {k}: tag={ggchild.tag}, attrib={ggchild.attrib}")
-        except Exception as e:
-            print(f"Error debugging XML structure: {e}")
-
     def _parse_single_xml(self, xml_file_path):
         try:
             tree = ET.parse(xml_file_path)
             root = tree.getroot()
             samples = []
             
-            # The IAM dataset has multiple possible XML structures:
-            # 1. <form> -> <handwritten-part> -> <line>
-            # 2. <form> -> <line>
-            # 3. Direct <line> elements
+            # Get form_id from the XML filename (e.g., a01-000u.xml -> a01-000u)
+            xml_filename = os.path.basename(xml_file_path)
+            form_id = xml_filename.replace('.xml', '')
             
             lines_found = 0
             valid_samples = 0
             
-            # Try to find all 'line' elements regardless of nesting
+            # Find all 'line' elements in the handwritten-part
             for line in root.iter('line'):
                 lines_found += 1
                 line_id = line.get('id')
                 text = line.get('text')
                 
                 if line_id and text and text.strip():
-                    # IAM line IDs are typically like: "a01-000u-00-00" or similar patterns
+                    # IAM line IDs are like: "a01-000u-00" 
+                    # Images are stored in: lines/a01/a01-000u/a01-000u-00.png
                     parts = line_id.split('-')
-                    if len(parts) >= 2:
+                    if len(parts) >= 3:
                         writer_id = parts[0]  # e.g., "a01"
+                        form_part = parts[1]  # e.g., "000u"
                         
-                        # Try multiple image path patterns
-                        possible_paths = [
-                            f"{writer_id}/{line_id}.png",           # Pattern 1: a01/a01-000u-00-00.png
-                            f"{line_id}.png",                       # Pattern 2: a01-000u-00-00.png
-                            f"{writer_id}-{parts[1]}/{line_id}.png" # Pattern 3: a01-000u/a01-000u-00-00.png
-                        ]
+                        # Construct the correct image path based on IAM structure
+                        # Path: writer_id/form_id/line_id.png
+                        image_path = f"{writer_id}/{form_id}/{line_id}.png"
+                        full_img_path = os.path.join(self.root_dir, image_path)
                         
-                        for image_path in possible_paths:
-                            full_img_path = os.path.join(self.root_dir, image_path)
-                            if os.path.exists(full_img_path):
-                                samples.append((image_path, text.strip()))
-                                valid_samples += 1
-                                break
+                        if os.path.exists(full_img_path):
+                            samples.append((image_path, text.strip()))
+                            valid_samples += 1
                         else:
-                            # If no image found, still add the sample for debugging
-                            if valid_samples < 5:  # Only show first 5 missing images
-                                print(f"Image not found for line {line_id}, tried paths: {possible_paths}")
+                            # Debug first few missing images
+                            if valid_samples < 3:
+                                print(f"Image not found: {full_img_path}")
+                                # Check what files actually exist in that directory
+                                dir_path = os.path.dirname(full_img_path)
+                                if os.path.exists(dir_path):
+                                    files = os.listdir(dir_path)[:5]  # Show first 5 files
+                                    print(f"  Directory exists, contains: {files}")
             
             if lines_found > 0:
                 print(f"  Found {lines_found} line elements, {valid_samples} with existing images")
