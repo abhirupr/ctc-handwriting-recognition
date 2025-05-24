@@ -4,7 +4,14 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional
 from joblib import Parallel, delayed
-from ctcdecode import CTCBeamDecoder
+
+# Import CTCBeamDecoder with fallback
+try:
+    from ctcdecode import CTCBeamDecoder
+    HAS_CTCDECODE = True
+except ImportError:
+    HAS_CTCDECODE = False
+    print("Warning: ctcdecode not available. Falling back to greedy decoding.")
 
 # ----- Positional Encoding -----
 class PositionalEncoding(nn.Module):
@@ -112,7 +119,7 @@ class CTCDecoderHead(nn.Module):
 
     def forward(self, x):
         # CRITICAL FIX: Return raw logits, not log_softmax
-        # Let the loss function handle the softmax/log_softmax
+        # The loss function will handle the softmax/log_softmax
         return self.output_layer(x)  # (B, T, V+1) - raw logits
 
 # ----- Full Model -----    
@@ -129,6 +136,11 @@ class CTCRecognitionModel(nn.Module):
     def forward(self, img):
         # img: (B,1,40,W)  — height normalized to 40 px
         B, C, H_in, W_in = img.size()
+        
+        # Ensure img requires grad for gradient flow
+        if self.training and not img.requires_grad:
+            img.requires_grad_(True)
+            
         if H_in != self.resize_height:
             # Ensure W_in doesn't change its scaling relative to H_in
             new_W = W_in * self.resize_height // H_in
@@ -165,24 +177,39 @@ class CTCRecognitionModel(nn.Module):
         # concat all valid features along time dim
         if features:
             feats = torch.cat(features, dim=1)  # (B, T_total, D)
-            return self.ctc_head(feats)         # (B, T_total, V+1)
+            output = self.ctc_head(feats)       # (B, T_total, V+1)
+            
+            # Ensure output has gradients when in training mode
+            if self.training and not output.requires_grad:
+                # This should not happen, but if it does, this is a safeguard
+                print("Warning: Model output missing gradients, attempting to fix...")
+                output.requires_grad_(True)
+                
+            return output
         else:
             # Handle edge case where no valid features were extracted
-            return torch.zeros(B, 1, self.ctc_head.output_layer.out_features, device=img.device)
+            empty_output = torch.zeros(B, 1, self.ctc_head.output_layer.out_features, 
+                                     device=img.device, requires_grad=self.training)
+            return empty_output
 
 # ----- PyctcDecode CTC Beam Decoder Wrapper (for inference) -----
 class PyCTCBeamDecoder:
     def __init__(self, labels, model_path=None, alpha=0.5, beta=1.0, cutoff_top_n=40, cutoff_prob=1.0, beam_width=100, num_processes=4, blank_id=0, log_probs_input=False):
-        try:
-            # Try to initialize CTCBeamDecoder
-            self.decoder = CTCBeamDecoder(labels, model_path, alpha, beta, cutoff_top_n, cutoff_prob, beam_width, num_processes, blank_id, log_probs_input)
-            self.available = True
-        except Exception as e:
-            print(f"CTCBeamDecoder not available: {e}")
+        if HAS_CTCDECODE:
+            try:
+                # Try to initialize CTCBeamDecoder
+                self.decoder = CTCBeamDecoder(labels, model_path, alpha, beta, cutoff_top_n, cutoff_prob, beam_width, num_processes, blank_id, log_probs_input)
+                self.available = True
+            except Exception as e:
+                print(f"CTCBeamDecoder initialization failed: {e}")
+                self.decoder = None
+                self.available = False
+        else:
             self.decoder = None
             self.available = False
-            self.labels = labels
-            self.blank_id = blank_id
+            
+        self.labels = labels
+        self.blank_id = blank_id
 
     def decode(self, probs, seq_lens=None):
         if self.available and self.decoder:
