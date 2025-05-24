@@ -7,7 +7,7 @@ import time
 from .metrics import calculate_cer, calculate_word_accuracy, calculate_sequence_accuracy, greedy_decode
 from .early_stopping import EarlyStopping
 
-def train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config):
+def train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config, scheduler=None):
     """Main training function with comprehensive metrics and early stopping"""
     model.to(device)
     
@@ -113,6 +113,12 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         
         # Save checkpoint
         save_checkpoint(model, optimizer, epoch, train_metrics['loss'], config, saved_checkpoints)
+        
+        if scheduler is not None:
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
+            print(f"Learning rate: {current_lr:.6f}")
+        
         print("-" * 80)
     
     # Training completed
