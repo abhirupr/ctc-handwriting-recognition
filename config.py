@@ -16,9 +16,11 @@ TEST_SIZE = 0.2  # Fraction of the dataset to use for testing
 BATCH_SIZE = 16
 EPOCHS = 20
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 0.001
 OPTIMIZER = "sgd"  # Options: "sgd", "adamw"
 GRADIENT_ACCUMULATION_STEPS = 1  # Number of steps for gradient accumulation
+EVAL_STEP = 1  # Evaluate every epoch
+EVAL_STRATEGY = "accuracy"  # Changed from "loss" to "accuracy"
 
 # Model save configuration
 SAVE_DIR = "resources/checkpoints"
