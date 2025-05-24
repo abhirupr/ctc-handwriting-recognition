@@ -1,8 +1,8 @@
 import torch
 
 # Dataset configuration
-DATA_DIR = "path/to/iam_dataset"
-XML_PATH = "path/to/annotations.xml"
+DATA_DIR = "data/iam_dataset/lines"
+XML_PATH = "data/iam_dataset/xml"
 VOCAB = (
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
