@@ -48,3 +48,10 @@ Thumbs.db
 
 # Environment variables
 .env
+
+# Language model files
+*.arpa
+*.binary
+model.arpa
+model.binary
+corpus.txt
