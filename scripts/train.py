@@ -19,8 +19,19 @@ import config
 
 def collate_fn(batch):
     """Custom collate function for IAM dataset"""
-    images, texts, lengths = zip(*batch)
-    return list(images), list(texts), list(lengths)
+    # Handle both (image, text) and (image, text, length) formats
+    if len(batch[0]) == 2:
+        # Dataset returns (image, text) pairs
+        images, texts = zip(*batch)
+        # Calculate text lengths
+        lengths = [len(text) for text in texts]
+        return list(images), list(texts), list(lengths)
+    elif len(batch[0]) == 3:
+        # Dataset returns (image, text, length) tuples
+        images, texts, lengths = zip(*batch)
+        return list(images), list(texts), list(lengths)
+    else:
+        raise ValueError(f"Unexpected batch item format. Expected 2 or 3 elements, got {len(batch[0])}")
 
 # Setup dataset and dataloader
 dataset = IAMDataset(DATA_DIR, XML_PATH)
