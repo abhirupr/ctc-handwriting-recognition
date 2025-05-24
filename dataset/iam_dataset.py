@@ -12,12 +12,25 @@ class IAMDataset(Dataset):
         else:
             self.samples = self.parse_xml(xml_path)
         print(f"Loaded {len(self.samples)} samples from dataset")
+        
+        # Fixed transform - removed None parameter and improved error handling
         self.transform = transform or transforms.Compose([
             transforms.Grayscale(),
-            transforms.Resize((40, None)),  # normalize height
+            # Custom resize that maintains aspect ratio with fixed height
+            transforms.Lambda(self._resize_keep_aspect_ratio),
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,))
         ])
+
+    def _resize_keep_aspect_ratio(self, img):
+        """Resize image to height 40 while maintaining aspect ratio"""
+        target_height = 40
+        w, h = img.size
+        if h == 0:  # Handle edge case
+            return img
+        aspect_ratio = w / h
+        new_width = int(target_height * aspect_ratio)
+        return img.resize((new_width, target_height), Image.LANCZOS)
 
     def parse_xml(self, xml_path):
         samples = []
@@ -79,8 +92,17 @@ class IAMDataset(Dataset):
                         full_img_path = os.path.join(self.root_dir, image_path)
                         
                         if os.path.exists(full_img_path):
-                            samples.append((image_path, text.strip()))
-                            valid_samples += 1
+                            # Additional check: verify the image can be opened
+                            try:
+                                with Image.open(full_img_path) as test_img:
+                                    # Check if image has valid dimensions
+                                    if test_img.size[0] > 0 and test_img.size[1] > 0:
+                                        samples.append((image_path, text.strip()))
+                                        valid_samples += 1
+                                    else:
+                                        print(f"Invalid image dimensions: {full_img_path}")
+                            except Exception as e:
+                                print(f"Cannot open image {full_img_path}: {e}")
                         else:
                             # Debug first few missing images
                             if valid_samples < 3:
@@ -112,11 +134,31 @@ class IAMDataset(Dataset):
         
         try:
             img = Image.open(full_img_path).convert('RGB')
+            
+            # Verify image is valid before transforming
+            if img.size[0] == 0 or img.size[1] == 0:
+                raise ValueError(f"Invalid image dimensions: {img.size}")
+                
             img = self.transform(img)
             return img, label
+            
         except Exception as e:
             print(f"Error loading image {full_img_path}: {e}")
-            # Return a dummy image and label
-            dummy_img = Image.new('RGB', (200, 40), color='white')
-            img = self.transform(dummy_img)
-            return img, ""
+            
+            # Create a proper dummy image with valid dimensions
+            try:
+                dummy_img = Image.new('RGB', (200, 40), color='white')
+                
+                # Add some text to the dummy image to make it more realistic
+                from PIL import ImageDraw
+                draw = ImageDraw.Draw(dummy_img)
+                draw.text((10, 10), "DUMMY", fill='black')
+                
+                img = self.transform(dummy_img)
+                return img, label if label else "dummy"
+                
+            except Exception as dummy_error:
+                print(f"Error creating dummy image: {dummy_error}")
+                # Last resort: return a minimal tensor
+                import torch
+                return torch.zeros(1, 40, 200), label if label else "dummy"
