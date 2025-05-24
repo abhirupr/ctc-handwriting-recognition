@@ -49,31 +49,40 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     if len(encoded) == 0:
                         continue  # Skip empty labels
                     
-                    # Ensure the encoded tensor is properly created for CTC loss
-                    # Convert to tensor if it's not already one
-                    if isinstance(encoded, list):
-                        labels_tensor = torch.tensor(encoded, dtype=torch.long)
+                    # Ensure proper tensor creation for CTC loss
+                    # CTC expects targets as a 1D tensor, not 2D
+                    if isinstance(encoded, torch.Tensor):
+                        # If it's already a tensor, detach it and ensure it's on CPU first
+                        labels_flat = encoded.detach().cpu()
+                        if labels_flat.dim() > 1:
+                            labels_flat = labels_flat.flatten()
+                        labels_tensor = labels_flat.to(device).long()
                     else:
-                        labels_tensor = encoded.clone().detach()
+                        # If it's a list, convert to tensor
+                        labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
                     
-                    # Move to device (labels don't need gradients)
-                    labels_tensor = labels_tensor.to(device)
-                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long).to(device)
+                    # Ensure labels_tensor is 1D
+                    if labels_tensor.dim() > 1:
+                        labels_tensor = labels_tensor.flatten()
+                    
+                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
                     
                     # Forward pass through model (handles chunking internally)
                     logits = model(img)  # (1, T, V+1) where T depends on image width
                     
-                    # CTC expects (T, B, V+1)
-                    log_probs = logits.log_softmax(2).permute(1, 0, 2)  # (T, 1, V+1)
+                    # CTC expects log probabilities in (T, B, V+1) format
+                    log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
                     
                     # Input lengths (sequence length for the single image)
-                    input_length = torch.tensor([logits.size(1)], dtype=torch.long).to(device)
-                    
-                    # Reshape labels for CTC loss - ensure proper shape
-                    labels_padded = labels_tensor.unsqueeze(0)  # (1, L)
+                    input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
                     
                     # Calculate CTC loss
-                    loss = criterion(log_probs, labels_padded, input_length, label_length)
+                    # Note: CTC loss expects:
+                    # - log_probs: (T, B, C) - log probabilities
+                    # - targets: (sum of target lengths) - concatenated targets
+                    # - input_lengths: (B,) - lengths of inputs
+                    # - target_lengths: (B,) - lengths of targets
+                    loss = criterion(log_probs, labels_tensor, input_length, label_length)
                     
                     # Check if loss is valid
                     if torch.isnan(loss) or torch.isinf(loss):
@@ -93,6 +102,7 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                             encoded = converter.encode([text])[0]
                             print(f"  Encoded type: {type(encoded)}")
                             print(f"  Encoded shape/len: {encoded.shape if hasattr(encoded, 'shape') else len(encoded)}")
+                            print(f"  Encoded requires_grad: {encoded.requires_grad if hasattr(encoded, 'requires_grad') else 'N/A'}")
                         except Exception as enc_error:
                             print(f"  Encoding error: {enc_error}")
                     continue
@@ -157,22 +167,26 @@ def evaluate_model(model, dataloader, converter, criterion, device):
                         continue
                     
                     # Ensure proper tensor creation
-                    if isinstance(encoded, list):
-                        labels_tensor = torch.tensor(encoded, dtype=torch.long)
+                    if isinstance(encoded, torch.Tensor):
+                        labels_flat = encoded.detach().cpu()
+                        if labels_flat.dim() > 1:
+                            labels_flat = labels_flat.flatten()
+                        labels_tensor = labels_flat.to(device).long()
                     else:
-                        labels_tensor = encoded.clone().detach()
+                        labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
                     
-                    labels_tensor = labels_tensor.to(device)
-                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long).to(device)
+                    if labels_tensor.dim() > 1:
+                        labels_tensor = labels_tensor.flatten()
+                    
+                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
                     
                     # Forward pass
                     logits = model(img)
-                    log_probs = logits.log_softmax(2).permute(1, 0, 2)
+                    log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
                     
-                    input_length = torch.tensor([logits.size(1)], dtype=torch.long).to(device)
-                    labels_padded = labels_tensor.unsqueeze(0)
+                    input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
                     
-                    loss = criterion(log_probs, labels_padded, input_length, label_length)
+                    loss = criterion(log_probs, labels_tensor, input_length, label_length)
                     
                     if not (torch.isnan(loss) or torch.isinf(loss)):
                         total_loss += loss.item()
