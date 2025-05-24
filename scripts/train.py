@@ -56,6 +56,9 @@ elif OPTIMIZER == "adamw":
 else:
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+# Add learning rate scheduler
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+
 # Train the model
 if __name__ == "__main__":
     device = torch.device(DEVICE)
@@ -69,6 +72,6 @@ if __name__ == "__main__":
         print(f"   Restore best weights: {es_config.get('restore_best_weights', True)}")
     
     # Start training with comprehensive metrics and early stopping
-    model = train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config)
+    model = train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config, scheduler)
     
     print("\n🎉 Training complete!")
