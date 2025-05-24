@@ -241,12 +241,24 @@ class PyCTCBeamDecoder:
             raise ValueError("Expected 3D tensor for probs")
 
 class CTCDecoder(nn.Module):
-    def __init__(self, labels, beam_width=10, blank_id=0):
+    def __init__(self, labels, beam_width=10, blank_id=0, lm_path=None, alpha=0.5, beta=1.0):
         super().__init__()
         self.labels = labels
         self.beam_width = beam_width
         self.blank_id = blank_id
-        self.beam_decoder = PyCTCBeamDecoder(labels, beam_width=beam_width, blank_id=blank_id)
+        
+        # Only use LM if path is provided and file exists
+        import os
+        use_lm = lm_path and os.path.exists(lm_path) if lm_path else False
+        
+        self.beam_decoder = PyCTCBeamDecoder(
+            labels, 
+            model_path=lm_path if use_lm else None,
+            alpha=alpha if use_lm else 0.0,
+            beta=beta if use_lm else 0.0,
+            beam_width=beam_width, 
+            blank_id=blank_id
+        )
 
     def decode(self, log_probs):
         # Convert log probabilities to probabilities
