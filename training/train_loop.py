@@ -35,24 +35,32 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         num_batches = 0
         
         for batch_idx, (images, texts, text_lengths) in enumerate(train_dataloader):
-            # Process images one by one due to variable widths and chunking strategy
+            # Reset gradients once per batch
+            optimizer.zero_grad()
             batch_losses = []
             
             for img_idx, (img, text) in enumerate(zip(images, texts)):
-                # Move single image to device and add batch dimension
-                img = img.unsqueeze(0).to(device)  # (1, C, H, W)
-                
-                # Convert text label to indices
                 try:
+                    # Move single image to device and add batch dimension
+                    img = img.unsqueeze(0).to(device)  # (1, C, H, W)
+                    
+                    # Convert text label to indices
                     encoded = converter.encode([text])[0]  # encode returns a list
                     if len(encoded) == 0:
                         continue  # Skip empty labels
                     
-                    labels_tensor = encoded.to(device)
-                    label_length = torch.tensor([len(encoded)], dtype=torch.long).to(device)
+                    # Ensure the encoded tensor is properly created for CTC loss
+                    # Convert to tensor if it's not already one
+                    if isinstance(encoded, list):
+                        labels_tensor = torch.tensor(encoded, dtype=torch.long)
+                    else:
+                        labels_tensor = encoded.clone().detach()
+                    
+                    # Move to device (labels don't need gradients)
+                    labels_tensor = labels_tensor.to(device)
+                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long).to(device)
                     
                     # Forward pass through model (handles chunking internally)
-                    optimizer.zero_grad()
                     logits = model(img)  # (1, T, V+1) where T depends on image width
                     
                     # CTC expects (T, B, V+1)
@@ -61,11 +69,16 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     # Input lengths (sequence length for the single image)
                     input_length = torch.tensor([logits.size(1)], dtype=torch.long).to(device)
                     
-                    # Reshape labels for CTC loss
+                    # Reshape labels for CTC loss - ensure proper shape
                     labels_padded = labels_tensor.unsqueeze(0)  # (1, L)
                     
                     # Calculate CTC loss
                     loss = criterion(log_probs, labels_padded, input_length, label_length)
+                    
+                    # Check if loss is valid
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"Invalid loss detected in sample {img_idx}, batch {batch_idx}")
+                        continue
                     
                     # Accumulate gradients
                     loss.backward()
@@ -73,6 +86,15 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     
                 except Exception as e:
                     print(f"Error processing sample {img_idx} in batch {batch_idx}: {e}")
+                    # Print more debug info for the first few errors
+                    if len(batch_losses) < 3:
+                        print(f"  Text: {text}")
+                        try:
+                            encoded = converter.encode([text])[0]
+                            print(f"  Encoded type: {type(encoded)}")
+                            print(f"  Encoded shape/len: {encoded.shape if hasattr(encoded, 'shape') else len(encoded)}")
+                        except Exception as enc_error:
+                            print(f"  Encoding error: {enc_error}")
                     continue
             
             # Update weights after processing all images in the batch
@@ -83,7 +105,7 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                 num_batches += 1
                 
                 if batch_idx % 10 == 0:  # Print every 10 batches
-                    print(f"Epoch {epoch+1}/{config.EPOCHS}, Batch {batch_idx}, Avg Loss: {avg_batch_loss:.4f}")
+                    print(f"Epoch {epoch+1}/{config.EPOCHS}, Batch {batch_idx}, Avg Loss: {avg_batch_loss:.4f}, Processed: {len(batch_losses)}/{len(images)}")
         
         avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
         print(f"Epoch {epoch+1}/{config.EPOCHS} - Average Loss: {avg_loss:.4f}")
@@ -134,8 +156,14 @@ def evaluate_model(model, dataloader, converter, criterion, device):
                     if len(encoded) == 0:
                         continue
                     
-                    labels_tensor = encoded.to(device)
-                    label_length = torch.tensor([len(encoded)], dtype=torch.long).to(device)
+                    # Ensure proper tensor creation
+                    if isinstance(encoded, list):
+                        labels_tensor = torch.tensor(encoded, dtype=torch.long)
+                    else:
+                        labels_tensor = encoded.clone().detach()
+                    
+                    labels_tensor = labels_tensor.to(device)
+                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long).to(device)
                     
                     # Forward pass
                     logits = model(img)
@@ -145,8 +173,10 @@ def evaluate_model(model, dataloader, converter, criterion, device):
                     labels_padded = labels_tensor.unsqueeze(0)
                     
                     loss = criterion(log_probs, labels_padded, input_length, label_length)
-                    total_loss += loss.item()
-                    num_samples += 1
+                    
+                    if not (torch.isnan(loss) or torch.isinf(loss)):
+                        total_loss += loss.item()
+                        num_samples += 1
                     
                 except Exception as e:
                     print(f"Error in validation: {e}")
