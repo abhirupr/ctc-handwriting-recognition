@@ -13,23 +13,25 @@ VOCAB = (
 TEST_SIZE = 0.2  # Fraction of the dataset to use for testing
 
 # Training configuration
-BATCH_SIZE = 16
-EPOCHS = 20
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+EPOCHS = 50  # Increase since early stopping will handle when to stop
 LEARNING_RATE = 0.001
-OPTIMIZER = "sgd"  # Options: "sgd", "adamw"
-GRADIENT_ACCUMULATION_STEPS = 1  # Number of steps for gradient accumulation
+BATCH_SIZE = 16
 EVAL_STEP = 1  # Evaluate every epoch
-EVAL_STRATEGY = "accuracy"  # Changed from "loss" to "accuracy"
-
-# Model save configuration
-SAVE_DIR = "resources/checkpoints"
-SAVE_LIMIT = 5  # Maximum number of checkpoints to keep
-EVAL_STEP = 1  # Evaluate the model every `EVAL_STEP` epochs
-EVAL_STRATEGY = "loss"  # Options: "loss", "accuracy"
-BEST_MODEL_DIR = "resources/best_model"  # Directory for the best model
+EVAL_STRATEGY = "accuracy"  # "accuracy" or "loss"
+BEST_MODEL_DIR = "resources/best_model"
 BEST_MODEL_NAME = "best_model.pth"
 CHECKPOINT_PREFIX = "model_epoch"
+
+# Early Stopping Configuration
+EARLY_STOPPING = {
+    "enabled": True,
+    "patience": 7,          # Stop after 7 epochs without improvement
+    "min_delta": 0.0001,    # Minimum improvement threshold
+    "mode": "max",          # "max" for accuracy, "min" for loss
+    "restore_best_weights": True,
+    "baseline": None,       # Optional baseline metric
+    "verbose": True
+}
 
 # Model configuration
 MODEL_CONFIG = {
@@ -39,8 +41,8 @@ MODEL_CONFIG = {
 }
 
 # Language Model Configuration
-USE_LANGUAGE_MODEL = True  # Enable language model
-LM_MODEL_PATH = "model.binary"  # Path to your built language model
-LM_ALPHA = 0.5  # Language model weight (tune this)
-LM_BETA = 1.0   # Word insertion penalty (tune this)
-BEAM_WIDTH = 100  # Beam search width
+USE_LANGUAGE_MODEL = True
+LM_MODEL_PATH = "model.binary"
+LM_ALPHA = 0.5
+LM_BETA = 1.0
+BEAM_WIDTH = 100
