@@ -17,11 +17,16 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Training configuration
 EPOCHS = 50  # Increase since early stopping will handle when to stop
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0001  # Reduced from 0.001
 BATCH_SIZE = 16
 OPTIMIZER = "adam"  # "adam", "sgd", or "adamw"
 EVAL_STEP = 1  # Evaluate every epoch
 EVAL_STRATEGY = "accuracy"  # "accuracy" or "loss"
+
+# Learning rate scheduling
+USE_LR_SCHEDULER = True
+LR_SCHEDULER_STEP_SIZE = 10
+LR_SCHEDULER_GAMMA = 0.5
 
 # Model saving configuration
 SAVE_DIR = "resources/checkpoints"  # Directory for saving checkpoints
