@@ -10,7 +10,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset.iam_dataset import IAMDataset
 from models.rtlr_model import CTCRecognitionModel
 from utils.label_converter import LabelConverter
-from training.train_loop import train_model, collate_fn  # Updated import path
+from training.train_loop import train_model
+from training.metrics import calculate_cer, calculate_word_accuracy
 from config import DATA_DIR, XML_PATH, VOCAB, BATCH_SIZE, EPOCHS, DEVICE, LEARNING_RATE, OPTIMIZER, MODEL_CONFIG, TEST_SIZE
 from sklearn.model_selection import train_test_split
 import config
@@ -39,4 +40,13 @@ else:
     raise ValueError(f"Unsupported optimizer: {OPTIMIZER}")
 
 # Train the model
-train_model(model, train_dataloader, val_dataloader, converter, DEVICE, optimizer, config)
+if __name__ == "__main__":
+    # Initialize everything as before
+    model = CTCRecognitionModel(vocab_size=config.MODEL_CONFIG["vocab_size"], 
+                               chunk_width=config.MODEL_CONFIG["chunk_width"],
+                               pad=config.MODEL_CONFIG["pad"])
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
+    
+    # Start training with comprehensive metrics
+    train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config)
