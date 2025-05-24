@@ -2,7 +2,7 @@ import torch
 
 # Dataset configuration
 DATA_DIR = "data/iam_dataset/lines"
-XML_PATH = "data/iam_dataset/xml"
+XML_PATH = "data/iam_dataset/xml/lines.xml"  # Updated to point to the actual XML file
 VOCAB = (
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -31,11 +31,5 @@ CHECKPOINT_PREFIX = "model_epoch"
 
 # Model configuration
 MODEL_CONFIG = {
-    "img_channel": 1,
-    "cnn_out_channels": 256,
-    "num_encoder_layers": 16,
-    "num_heads": 8,
-    "d_model": 256,
-    "dim_feedforward": 512,
     "vocab_size": len(VOCAB),
 }
