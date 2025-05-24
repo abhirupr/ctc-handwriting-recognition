@@ -16,17 +16,17 @@ TEST_SIZE = 0.2  # Fraction of the dataset to use for testing
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Training configuration
-EPOCHS = 50  # Increase since early stopping will handle when to stop
-LEARNING_RATE = 0.0001  # Reduced from 0.001
-BATCH_SIZE = 16
-OPTIMIZER = "adam"  # "adam", "sgd", or "adamw"
+EPOCHS = 20  # More epochs for better learning
+LEARNING_RATE = 0.001  # Keep current LR
+BATCH_SIZE = 8  # Keep current batch size
+OPTIMIZER = "adam"  # Keep Adam
 EVAL_STEP = 1  # Evaluate every epoch
-EVAL_STRATEGY = "accuracy"  # "accuracy" or "loss"
+EVAL_STRATEGY = "loss"  # Change to loss-based evaluation
 
 # Learning rate scheduling
 USE_LR_SCHEDULER = True
-LR_SCHEDULER_STEP_SIZE = 10
-LR_SCHEDULER_GAMMA = 0.5
+LR_SCHEDULER_STEP_SIZE = 5  # Reduce LR every 5 epochs
+LR_SCHEDULER_GAMMA = 0.7  # More gradual reduction
 
 # Model saving configuration
 SAVE_DIR = "resources/checkpoints"  # Directory for saving checkpoints
@@ -35,14 +35,14 @@ BEST_MODEL_DIR = "resources/best_model"
 BEST_MODEL_NAME = "best_model.pth"
 CHECKPOINT_PREFIX = "model_epoch"
 
-# Early Stopping Configuration
+# Early Stopping Configuration - CER-based
 EARLY_STOPPING = {
     "enabled": True,
-    "patience": 7,          # Stop after 7 epochs without improvement
-    "min_delta": 0.0001,    # Minimum improvement threshold
-    "mode": "max",          # "max" for accuracy, "min" for loss
+    "patience": 8,          # Reasonable patience
+    "min_delta": 1.0,       # 1% CER improvement required
+    "mode": "min",          # "min" for CER (lower is better)
     "restore_best_weights": True,
-    "baseline": None,       # Optional baseline metric
+    "baseline": None,
     "verbose": True
 }
 
@@ -59,6 +59,9 @@ LM_MODEL_PATH = "model.binary"
 LM_ALPHA = 0.5
 LM_BETA = 1.0
 BEAM_WIDTH = 100
+
+# Debugging configuration
+DEBUG_MODE = False  # Disable debug output
 
 # Create necessary directories
 import os

@@ -68,9 +68,10 @@ def check_convergence_issues(model):
         else:
             print(f"⚠️ No gradient for {name}")
     
-    total_norm = total_norm ** (1. / 2)
-    print(f"Total gradient norm: {total_norm:.6f}")
-    print(f"Parameters with gradients: {param_count}")
+    if param_count > 0:
+        total_norm = total_norm ** (1. / 2)
+        print(f"Total gradient norm: {total_norm:.6f}")
+        print(f"Parameters with gradients: {param_count}")
     
     # Check parameter magnitudes
     large_params = 0

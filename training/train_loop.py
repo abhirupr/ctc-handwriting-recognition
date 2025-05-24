@@ -87,15 +87,15 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                 torch.save(model.state_dict(), best_model_path)
                 print(f"✅ Best model saved! {config.EVAL_STRATEGY.capitalize()}: {best_metric:.4f}")
             
-            # Check early stopping
+            # Check early stopping - Use CER instead of accuracy
             if early_stopping is not None:
-                # Use the metric for early stopping (same as evaluation strategy)
-                early_stop_metric = current_metric
+                # Use CER for early stopping (lower is better)
+                early_stop_metric = val_metrics['cer']  # Use CER instead of accuracy
                 
                 should_stop = early_stopping(early_stop_metric, model)
                 if should_stop:
                     print(f"\n🛑 Training stopped early at epoch {epoch + 1}")
-                    print(f"   Best {config.EVAL_STRATEGY}: {early_stopping.get_best_metric():.4f}")
+                    print(f"   Best CER: {early_stopping.get_best_metric():.2f}%")
                     
                     # Restore best weights if configured
                     if early_stopping.restore_best_weights:
@@ -173,10 +173,21 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                 label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
                 
                 # Forward pass
-                logits = model(img)
+                logits = model(img)  # (1, T, V+1) where T depends on image width
                 
+                # Debug: Print sample details for less batches
+                if batch_idx < 1 and img_idx == 0:  # Only first batch
+                    print(f"\n🔍 Sample Debug (Batch {batch_idx}):")
+                    print(f"   Image shape: {img.shape}")
+                    print(f"   Logits shape: {logits.shape}")
+                    print(f"   Text: '{text}' (len: {len(text)})")
+                    print(f"   Encoded: {encoded} (len: {len(encoded)})")
+                    print(f"   Logits range: [{logits.min().item():.3f}, {logits.max().item():.3f}]")
+                    print(f"   Logits std: {logits.std().item():.3f}")
+                
+                # Verify gradients are flowing
                 if not logits.requires_grad:
-                    print(f"Warning: Model output missing gradients in batch {batch_idx}, sample {img_idx}")
+                    print(f"Warning: Model output still doesn't require grad in batch {batch_idx}, sample {img_idx}")
                     continue
                 
                 # Validate input/label alignment
@@ -189,14 +200,35 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                     print(f"⚠️ Sequence too short: {logits.size(1)} time steps")
                     continue
                 
-                # CTC Loss
+                # CTC expects log probabilities in (T, B, V+1) format
                 log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
+                
+                # Input lengths (sequence length for the single image)
                 input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
                 
+                # Debug CTC inputs for first few samples
+                if batch_idx < 3 and img_idx == 0:
+                    print(f"   CTC Input length: {input_length.item()}")
+                    print(f"   Target length: {label_length.item()}")
+                    print(f"   Log probs shape: {log_probs.shape}")
+                    print(f"   Log probs range: [{log_probs.min().item():.3f}, {log_probs.max().item():.3f}]")
+                
+                # Validate tensor shapes before CTC loss
                 if log_probs.size(0) == 0 or labels_tensor.size(0) == 0:
+                    print(f"Empty sequence detected in batch {batch_idx}, sample {img_idx}")
                     continue
                 
+                # Check if input sequence is long enough for target
+                if input_length.item() < label_length.item():
+                    print(f"⚠️ Sequence too short: input_len={input_length.item()}, target_len={label_length.item()}")
+                    continue
+                
+                # Calculate CTC loss
                 loss = criterion(log_probs, labels_tensor, input_length, label_length)
+                
+                # Debug loss for first few samples
+                if batch_idx < 3 and img_idx == 0:
+                    print(f"   CTC Loss: {loss.item():.4f}")
                 
                 if torch.isnan(loss) or torch.isinf(loss):
                     continue
@@ -205,12 +237,28 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                 loss.backward()
                 batch_losses.append(loss.item())
                 
+                # Debug gradients for first few batches
+                if batch_idx < 3 and img_idx == 0:
+                    total_grad_norm = 0
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            param_norm = param.grad.data.norm(2)
+                            total_grad_norm += param_norm.item() ** 2
+                    total_grad_norm = total_grad_norm ** (1. / 2)
+                    print(f"   Total gradient norm: {total_grad_norm:.6f}")
+                
                 # Decode for metrics (every 10th batch to save computation)
                 if batch_idx % 10 == 0:
                     with torch.no_grad():
                         pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
                         batch_predictions.extend(pred_texts)
                         batch_targets.append(text)
+                
+                # Quick decode check for first few samples
+                if batch_idx == 0 and img_idx == 0:  # Only first sample of first batch
+                    with torch.no_grad():
+                        sample_decoded = greedy_decode(log_probs.permute(1, 0, 2), converter)
+                        print(f"📝 Sample decode: '{sample_decoded[0][:50]}...' (target: '{text[:50]}...')")
                 
             except Exception as e:
                 if batch_idx < 3:  # Only print first few errors
@@ -246,10 +294,14 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
         train_accuracy = 0.0
     
     # Debug: Check model after each epoch
-    if epoch % 5 == 0:  # Every 5 epochs
+    if epoch % 10 == 0:  # Every 10 epochs instead of 5
         print(f"\n🔍 Debug after epoch {epoch + 1}:")
+        from .debug_helpers import check_convergence_issues, debug_model_output
         check_convergence_issues(model)
-        debug_model_output(model, (images[:1], texts[:1], [len(texts[0])]), converter, device)
+        # Get a sample from the current batch
+        sample_images = images[:1] if 'images' in locals() else [next(iter(train_dataloader))[0][0]]
+        sample_texts = texts[:1] if 'texts' in locals() else [next(iter(train_dataloader))[1][0]]
+        debug_model_output(model, (sample_images, sample_texts, [len(sample_texts[0])]), converter, device)
     
     return {
         'loss': avg_loss,

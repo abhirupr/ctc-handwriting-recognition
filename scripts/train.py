@@ -56,8 +56,15 @@ elif OPTIMIZER == "adamw":
 else:
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-# Add learning rate scheduler
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+# Add learning rate scheduler with warmup
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=LEARNING_RATE * 10,  # Peak LR
+    epochs=EPOCHS,
+    steps_per_epoch=len(train_dataloader),
+    pct_start=0.1,  # 10% warmup
+    anneal_strategy='cos'
+)
 
 # Train the model
 if __name__ == "__main__":

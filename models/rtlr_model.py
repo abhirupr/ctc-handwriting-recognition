@@ -126,71 +126,77 @@ class CTCDecoderHead(nn.Module):
 class CTCRecognitionModel(nn.Module):
     def __init__(self, vocab_size, chunk_width=320, pad=32):
         super().__init__()
-        self.chunk_w  = chunk_width      # 320 px (for example)
-        self.pad      = pad              # bidirectional padding
-        self.backbone = CNNBackbone()
-        self.encoder  = SelfAttentionEncoder(num_layers=16)
-        self.ctc_head = CTCDecoderHead(256, vocab_size)
-        self.resize_height = 40
-
-    def forward(self, img):
-        # img: (B,1,40,W)  — height normalized to 40 px
-        B, C, H_in, W_in = img.size()
+        self.vocab_size = vocab_size
+        self.chunk_width = chunk_width
+        self.pad = pad
         
-        # Ensure img requires grad for gradient flow
-        if self.training and not img.requires_grad:
-            img.requires_grad_(True)
+        # CNN backbone for feature extraction
+        self.cnn = nn.Sequential(
+            # First conv block
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # /2
             
-        if H_in != self.resize_height:
-            # Ensure W_in doesn't change its scaling relative to H_in
-            new_W = W_in * self.resize_height // H_in
-            img = F.interpolate(img, size=(self.resize_height, new_W),
-                                mode='bilinear', align_corners=False)
-            _, _, _, W_in = img.size()  # Update W_in after resize
+            # Second conv block  
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # /4
             
-        features = []
-
-        # Compute how many chunks
-        step = self.chunk_w - 2*self.pad
-        for start in range(0, W_in, step):
-            end = min(start + self.chunk_w, W_in)
-            # pad both sides
-            left = max(start - self.pad, 0)
-            right = min(end + self.pad, W_in)
-            chunk = img[:, :, :, left:right]
-
-            # if near right edge, pad to full chunk size
-            if chunk.size(3) < self.chunk_w + 2*self.pad:
-                pad_w = self.chunk_w + 2*self.pad - chunk.size(3)
-                chunk = F.pad(chunk, (0, pad_w), "constant", 0)
-
-            # run through backbone+encoder
-            f = self.backbone(chunk)      # (B, Tc, D)
-            f = self.encoder(f)           # (B, Tc, D)
-
-            # remove padded timesteps
-            valid_start = max(0, self.pad - (start - left))
-            valid_end = valid_start + min(step, W_in - start)
-            if valid_end > valid_start and valid_end <= f.size(1):
-                features.append(f[:, valid_start:valid_end, :])
-
-        # concat all valid features along time dim
-        if features:
-            feats = torch.cat(features, dim=1)  # (B, T_total, D)
-            output = self.ctc_head(feats)       # (B, T_total, V+1)
+            # Third conv block
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d((2, 1)),  # /8 height, /4 width
             
-            # Ensure output has gradients when in training mode
-            if self.training and not output.requires_grad:
-                # This should not happen, but if it does, this is a safeguard
-                print("Warning: Model output missing gradients, attempting to fix...")
-                output.requires_grad_(True)
-                
-            return output
-        else:
-            # Handle edge case where no valid features were extracted
-            empty_output = torch.zeros(B, 1, self.ctc_head.output_layer.out_features, 
-                                     device=img.device, requires_grad=self.training)
-            return empty_output
+            # Fourth conv block
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d((2, 1)),  # /16 height, /4 width
+        )
+        
+        # Calculate feature dimensions after CNN
+        # Input: (H=40, W=641) -> After pooling: (H=2-3, W=160)
+        self.feature_height = 2  # 40 -> 20 -> 10 -> 5 -> 2
+        self.feature_dim = 256 * self.feature_height  # 256 * 2 = 512
+        
+        # LSTM for sequence modeling
+        self.lstm = nn.LSTM(
+            input_size=self.feature_dim,
+            hidden_size=256,
+            num_layers=2,
+            bidirectional=True,
+            dropout=0.3,
+            batch_first=True
+        )
+        
+        # Output projection
+        self.classifier = nn.Linear(256 * 2, vocab_size)  # *2 for bidirectional
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout(0.3)
+        
+    def forward(self, x):
+        batch_size = x.size(0)
+        
+        # CNN feature extraction
+        features = self.cnn(x)  # (B, 256, H', W')
+        
+        # Reshape for LSTM: (B, W', C*H')
+        B, C, H, W = features.size()
+        features = features.permute(0, 3, 1, 2)  # (B, W', C, H')
+        features = features.contiguous().view(B, W, C * H)  # (B, W', C*H')
+        
+        # LSTM processing
+        lstm_out, _ = self.lstm(features)  # (B, W', hidden_size*2)
+        lstm_out = self.dropout(lstm_out)
+        
+        # Classification
+        output = self.classifier(lstm_out)  # (B, W', vocab_size)
+        
+        return output
 
 # ----- PyctcDecode CTC Beam Decoder Wrapper (for inference) -----
 class PyCTCBeamDecoder:
