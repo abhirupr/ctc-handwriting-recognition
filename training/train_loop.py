@@ -40,14 +40,7 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     print(f"Model parameters requiring gradients: {grad_params}/{total_params}")
     
     for epoch in range(config.EPOCHS):
-        # Explicitly set model to training mode at the start of each epoch
         model.train()
-        
-        # Double-check training mode
-        if not model.training:
-            print("Warning: Model not in training mode, forcing training mode")
-            model.train()
-        
         total_loss = 0
         num_batches = 0
         
@@ -58,12 +51,11 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
             
             for img_idx, (img, text) in enumerate(zip(images, texts)):
                 try:
-                    # Ensure model is still in training mode (sometimes gets reset)
-                    if not model.training:
-                        model.train()
-                    
                     # Move single image to device and add batch dimension
                     img = img.unsqueeze(0).to(device)  # (1, C, H, W)
+                    
+                    # CRITICAL FIX: Ensure input requires gradients
+                    img.requires_grad_(True)
                     
                     # Convert text label to indices
                     encoded = converter.encode([text])[0]  # encode returns a list
@@ -88,22 +80,14 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
                     
                     # Forward pass through model (handles chunking internally)
-                    # Enable gradient computation explicitly
-                    with torch.enable_grad():
-                        logits = model(img)  # (1, T, V+1) where T depends on image width
+                    logits = model(img)  # (1, T, V+1) where T depends on image width
                     
-                    # Check if logits require grad
+                    # Verify gradients are flowing
                     if not logits.requires_grad:
-                        print(f"Warning: Model output doesn't require grad in batch {batch_idx}, sample {img_idx}")
-                        print(f"  Model training mode: {model.training}")
+                        print(f"Warning: Model output still doesn't require grad in batch {batch_idx}, sample {img_idx}")
                         print(f"  Input requires grad: {img.requires_grad}")
-                        
-                        # Try to force gradient requirement
-                        if hasattr(logits, 'requires_grad_'):
-                            logits.requires_grad_(True)
-                        else:
-                            print(f"  Cannot force gradients on logits, skipping sample")
-                            continue
+                        print(f"  Model training mode: {model.training}")
+                        continue
                     
                     # CTC expects log probabilities in (T, B, V+1) format
                     log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
@@ -117,11 +101,6 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                         continue
                     
                     # Calculate CTC loss
-                    # Note: CTC loss expects:
-                    # - log_probs: (T, B, C) - log probabilities  
-                    # - targets: (sum of target lengths) - concatenated targets
-                    # - input_lengths: (B,) - lengths of inputs
-                    # - target_lengths: (B,) - lengths of targets
                     loss = criterion(log_probs, labels_tensor, input_length, label_length)
                     
                     # Check if loss is valid
@@ -136,7 +115,6 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                 except RuntimeError as e:
                     if "grad" in str(e).lower():
                         print(f"Gradient error in sample {img_idx}, batch {batch_idx}: {e}")
-                        # Try to recover by skipping this sample
                         continue
                     else:
                         print(f"Runtime error processing sample {img_idx} in batch {batch_idx}: {e}")
@@ -150,7 +128,6 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                             encoded = converter.encode([text])[0]
                             print(f"  Encoded type: {type(encoded)}")
                             print(f"  Encoded shape/len: {encoded.shape if hasattr(encoded, 'shape') else len(encoded)}")
-                            print(f"  Encoded requires_grad: {encoded.requires_grad if hasattr(encoded, 'requires_grad') else 'N/A'}")
                         except Exception as enc_error:
                             print(f"  Encoding error: {enc_error}")
                     continue
