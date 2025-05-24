@@ -16,6 +16,11 @@ def collate_fn(batch):
 def train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config):
     """Main training function"""
     model.to(device)
+    
+    # Ensure model parameters require gradients
+    for param in model.parameters():
+        param.requires_grad = True
+    
     criterion = nn.CTCLoss(blank=0, zero_infinity=True)  # blank=0 for CTC blank token
     
     # Create directories for saving models
@@ -29,8 +34,20 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     print(f"Training samples: {len(train_dataloader.dataset)}")
     print(f"Validation samples: {len(val_dataloader.dataset)}")
     
+    # Debug: Check if model parameters require gradients
+    grad_params = sum(p.requires_grad for p in model.parameters())
+    total_params = sum(1 for _ in model.parameters())
+    print(f"Model parameters requiring gradients: {grad_params}/{total_params}")
+    
     for epoch in range(config.EPOCHS):
+        # Explicitly set model to training mode at the start of each epoch
         model.train()
+        
+        # Double-check training mode
+        if not model.training:
+            print("Warning: Model not in training mode, forcing training mode")
+            model.train()
+        
         total_loss = 0
         num_batches = 0
         
@@ -41,6 +58,10 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
             
             for img_idx, (img, text) in enumerate(zip(images, texts)):
                 try:
+                    # Ensure model is still in training mode (sometimes gets reset)
+                    if not model.training:
+                        model.train()
+                    
                     # Move single image to device and add batch dimension
                     img = img.unsqueeze(0).to(device)  # (1, C, H, W)
                     
@@ -67,12 +88,22 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
                     label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
                     
                     # Forward pass through model (handles chunking internally)
-                    logits = model(img)  # (1, T, V+1) where T depends on image width
+                    # Enable gradient computation explicitly
+                    with torch.enable_grad():
+                        logits = model(img)  # (1, T, V+1) where T depends on image width
                     
-                    # Ensure logits require grad (should be automatic from model)
+                    # Check if logits require grad
                     if not logits.requires_grad:
                         print(f"Warning: Model output doesn't require grad in batch {batch_idx}, sample {img_idx}")
-                        continue
+                        print(f"  Model training mode: {model.training}")
+                        print(f"  Input requires grad: {img.requires_grad}")
+                        
+                        # Try to force gradient requirement
+                        if hasattr(logits, 'requires_grad_'):
+                            logits.requires_grad_(True)
+                        else:
+                            print(f"  Cannot force gradients on logits, skipping sample")
+                            continue
                     
                     # CTC expects log probabilities in (T, B, V+1) format
                     log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
