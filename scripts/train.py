@@ -1,4 +1,10 @@
+import sys
 import os
+
+# Add the project root directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import SGD, AdamW
