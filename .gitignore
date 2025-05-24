@@ -14,6 +14,7 @@ ctcdecode/
 data/
 .eggs/
 *.egg-info/
+resources/
 
 # PyInstaller
 *.spec
