@@ -16,7 +16,7 @@ def collate_fn(batch):
     label_lengths = torch.tensor([len(l) for l in labels], dtype=torch.long)
     return images, labels_padded, label_lengths
 
-def train(
+def train_model(  # Renamed from 'train' to 'train_model'
     model, dataloader, val_dataloader, converter, device, optimizer, config
 ):
     model.to(device)
