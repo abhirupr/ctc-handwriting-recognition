@@ -39,8 +39,10 @@ converter = LabelConverter(VOCAB)
 
 # Split dataset into train and validation sets
 train_samples, val_samples = train_test_split(dataset.samples, test_size=TEST_SIZE, random_state=42)
-train_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=train_samples)
-val_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=val_samples)
+train_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=train_samples, 
+                          augment=True, augment_config=config.DATA_AUGMENTATION)
+val_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=val_samples, 
+                        augment=False)  # No augmentation for validation
 
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
@@ -56,15 +58,27 @@ elif OPTIMIZER == "adamw":
 else:
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-# Add learning rate scheduler with warmup
-scheduler = torch.optim.lr_scheduler.OneCycleLR(
+# Choose which scheduler to use
+USE_PLATEAU_SCHEDULER = True  # Set to True for ReduceLROnPlateau
+
+if USE_PLATEAU_SCHEDULER:
+    # ReduceLROnPlateau - adaptive based on validation CER
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
-    max_lr=LEARNING_RATE * 10,  # Peak LR
-    epochs=EPOCHS,
-    steps_per_epoch=len(train_dataloader),
-    pct_start=0.1,  # 10% warmup
-    anneal_strategy='cos'
-)
+    mode='min',
+    factor=0.7,      # Less aggressive reduction
+    patience=8,      # More patience
+    min_lr=1e-5,     # Higher minimum LR
+    verbose=True
+    )
+else:
+    # CosineAnnealingWarmRestarts - time-based
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=10,        # Restart every 10 epochs
+        T_mult=2,      # Double the restart period each time
+        eta_min=1e-6   # Minimum learning rate
+    )
 
 # Train the model
 if __name__ == "__main__":

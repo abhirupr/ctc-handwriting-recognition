@@ -114,10 +114,16 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         # Save checkpoint
         save_checkpoint(model, optimizer, epoch, train_metrics['loss'], config, saved_checkpoints)
         
+        # Update learning rate scheduler
         if scheduler is not None:
-            scheduler.step()
-            current_lr = scheduler.get_last_lr()[0]
-            print(f"Learning rate: {current_lr:.6f}")
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                # ReduceLROnPlateau needs validation metric
+                scheduler.step(val_metrics['cer'])
+                print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+            else:
+                # Time-based schedulers
+                scheduler.step()
+                print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         print("-" * 80)
     
@@ -265,9 +271,18 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                     print(f"Error in batch {batch_idx}, sample {img_idx}: {e}")
                 continue
         
-        # Update weights
+        # Update weights with gradient scaling
         if batch_losses:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # Scale gradients if they're too small
+            total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            
+            # Check if gradients are too small
+            if total_grad_norm < 0.1:
+                # Scale up gradients
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad.data *= 2.0
+            
             optimizer.step()
             
             avg_batch_loss = sum(batch_losses) / len(batch_losses)

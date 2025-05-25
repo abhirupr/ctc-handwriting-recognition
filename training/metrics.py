@@ -46,6 +46,45 @@ def greedy_decode(log_probs, converter, blank_id=0):
     
     return decoded_texts
 
+def greedy_decode_with_confidence(log_probs, converter, blank_id=0, confidence_threshold=0.1):
+    """Enhanced greedy decode with confidence filtering"""
+    batch_size = log_probs.size(0)
+    decoded_texts = []
+    
+    for batch_idx in range(batch_size):
+        seq_log_probs = log_probs[batch_idx]
+        
+        # Get probabilities and predictions
+        probs = torch.exp(seq_log_probs)
+        predictions = torch.argmax(seq_log_probs, dim=1)
+        confidences = torch.max(probs, dim=1)[0]
+        
+        # Filter by confidence
+        decoded_indices = []
+        prev_token = None
+        
+        for i, (token, conf) in enumerate(zip(predictions, confidences)):
+            token_val = token.item()
+            conf_val = conf.item()
+            
+            # Skip low confidence predictions
+            if conf_val < confidence_threshold:
+                continue
+                
+            # Skip blanks and consecutive duplicates
+            if token_val != blank_id and token_val != prev_token:
+                decoded_indices.append(token_val)
+            prev_token = token_val
+        
+        # Convert to text
+        try:
+            decoded_text = converter.decode([decoded_indices])[0]
+            decoded_texts.append(decoded_text)
+        except:
+            decoded_texts.append("")
+    
+    return decoded_texts
+
 def calculate_cer(predictions: List[str], targets: List[str]) -> float:
     """Calculate Character Error Rate"""
     if not predictions or not targets:

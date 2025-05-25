@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 
 class IAMDataset(Dataset):
-    def __init__(self, root_dir, xml_path, samples=None, transform=None):
+    def __init__(self, root_dir, xml_path, samples=None, transform=None, augment=False, augment_config=None):
         self.root_dir = root_dir
         if samples is not None:
             self.samples = samples
@@ -21,6 +21,13 @@ class IAMDataset(Dataset):
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,))
         ])
+        
+        self.augment = augment
+        if augment and augment_config:
+            from .transforms import HandwritingAugmentation
+            self.augmentation = HandwritingAugmentation(augment_config)
+        else:
+            self.augmentation = None
 
     def _resize_keep_aspect_ratio(self, img):
         """Resize image to height 40 while maintaining aspect ratio"""
@@ -139,8 +146,13 @@ class IAMDataset(Dataset):
             if img.size[0] == 0 or img.size[1] == 0:
                 raise ValueError(f"Invalid image dimensions: {img.size}")
                 
-            img = self.transform(img)
-            return img, label
+            img_tensor = self.transform(img)
+            
+            # Apply augmentation only during training
+            if self.augment and self.augmentation:
+                img_tensor = self.augmentation(img_tensor)
+            
+            return img_tensor, label
             
         except Exception as e:
             print(f"Error loading image {full_img_path}: {e}")

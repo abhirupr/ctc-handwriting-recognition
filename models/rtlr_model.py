@@ -124,77 +124,78 @@ class CTCDecoderHead(nn.Module):
 
 # ----- Full Model -----    
 class CTCRecognitionModel(nn.Module):
-    def __init__(self, vocab_size, chunk_width=320, pad=32):
+    def __init__(self, vocab_size, chunk_width=320, pad=32, dropout_rate=0.3):
         super().__init__()
         self.vocab_size = vocab_size
         self.chunk_width = chunk_width
         self.pad = pad
         
-        # CNN backbone for feature extraction
+        # Enhanced CNN backbone
         self.cnn = nn.Sequential(
             # First conv block
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),  # /2
-            
-            # Second conv block  
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(1, 64, kernel_size=3, padding=1),  # Increase channels
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2, 2),  # /4
+            nn.MaxPool2d(2, 2),
             
-            # Third conv block
+            # Second conv block  
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d((2, 1)),  # /8 height, /4 width
+            nn.MaxPool2d(2, 2),
             
-            # Fourth conv block
+            # Third conv block
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.MaxPool2d((2, 1)),  # /16 height, /4 width
+            nn.MaxPool2d((2, 1)),  # Preserve width
+            
+            # Fourth conv block
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),  # More features
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d((2, 1)),
         )
         
-        # Calculate feature dimensions after CNN
-        # Input: (H=40, W=641) -> After pooling: (H=2-3, W=160)
+        # Calculate feature dimensions
         self.feature_height = 2  # 40 -> 20 -> 10 -> 5 -> 2
-        self.feature_dim = 256 * self.feature_height  # 256 * 2 = 512
+        self.feature_dim = 512 * self.feature_height  # 512 * 2 = 1024
         
-        # LSTM for sequence modeling
+        # Enhanced LSTM
         self.lstm = nn.LSTM(
             input_size=self.feature_dim,
-            hidden_size=256,
-            num_layers=2,
+            hidden_size=512,        # Increase hidden size
+            num_layers=2,           # Reduce layers
             bidirectional=True,
-            dropout=0.3,
+            dropout=dropout_rate if dropout_rate > 0 else 0,
             batch_first=True
         )
         
-        # Output projection
-        self.classifier = nn.Linear(256 * 2, vocab_size)  # *2 for bidirectional
+        self.dropout = nn.Dropout(dropout_rate)
         
-        # Dropout for regularization
-        self.dropout = nn.Dropout(0.3)
-        
+        # Better classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 2, 256),  # Reduce dimensionality
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(256, vocab_size)
+        )
+
     def forward(self, x):
-        batch_size = x.size(0)
-        
         # CNN feature extraction
-        features = self.cnn(x)  # (B, 256, H', W')
+        features = self.cnn(x)  # (B, 512, H', W')
         
-        # Reshape for LSTM: (B, W', C*H')
+        # Reshape for LSTM
         B, C, H, W = features.size()
         features = features.permute(0, 3, 1, 2)  # (B, W', C, H')
-        features = features.contiguous().view(B, W, C * H)  # (B, W', C*H')
+        features = features.contiguous().view(B, W, C * H)
         
         # LSTM processing
-        lstm_out, _ = self.lstm(features)  # (B, W', hidden_size*2)
+        lstm_out, _ = self.lstm(features)
         lstm_out = self.dropout(lstm_out)
         
         # Classification
-        output = self.classifier(lstm_out)  # (B, W', vocab_size)
+        output = self.classifier(lstm_out)
         
         return output
 

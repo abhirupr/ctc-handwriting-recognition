@@ -15,18 +15,22 @@ TEST_SIZE = 0.2  # Fraction of the dataset to use for testing
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Training configuration - SINGLE SET OF VALUES
-EPOCHS = 30  
-LEARNING_RATE = 0.0005  
-BATCH_SIZE = 12  
-OPTIMIZER = "adam"  
-EVAL_STEP = 1  
-EVAL_STRATEGY = "loss"  
+# Training configuration - Increase learning rate
+EPOCHS = 50  
+LEARNING_RATE = 0.001  
+BATCH_SIZE = 16  
+OPTIMIZER = "adam"
+EVAL_STEP = 1
+EVAL_STRATEGY = "loss"
 
-# Learning rate scheduling
+# Better learning rate scheduling
 USE_LR_SCHEDULER = True
-LR_SCHEDULER_STEP_SIZE = 5  
-LR_SCHEDULER_GAMMA = 0.7  
+LR_SCHEDULER_STEP_SIZE = 10  
+LR_SCHEDULER_GAMMA = 0.8     
+
+# Reduce dropout to prevent overfitting
+DROPOUT_RATE = 0.3  
+WEIGHT_DECAY = 1e-4  
 
 # Model saving configuration
 SAVE_DIR = "resources/checkpoints"  
@@ -38,8 +42,8 @@ CHECKPOINT_PREFIX = "model_epoch"
 # Early Stopping Configuration - CER-based
 EARLY_STOPPING = {
     "enabled": True,
-    "patience": 8,          
-    "min_delta": 1.0,       
+    "patience": 12,        
+    "min_delta": 0.5,       
     "mode": "min",          
     "restore_best_weights": True,
     "baseline": None,
@@ -48,9 +52,10 @@ EARLY_STOPPING = {
 
 # Model configuration
 MODEL_CONFIG = {
-    "vocab_size": len(VOCAB),
+    "vocab_size": len(VOCAB) + 1,  # +1 for blank token
     "chunk_width": 320,
     "pad": 32,
+    "dropout_rate": DROPOUT_RATE
 }
 
 # Language Model Configuration
@@ -65,15 +70,15 @@ DEBUG_MODE = False
 
 # Data augmentation
 DATA_AUGMENTATION = {
-    "rotation": 2.0,
-    "shear": 0.1,
+    "enabled": True,
+    "rotation": 3.0,        
+    "shear": 0.15,          
     "elastic_transform": True,
-    "noise": 0.02
+    "noise": 0.03,          
+    "brightness": 0.2,      
+    "contrast": 0.2,        
+    "blur": 0.5,           
 }
-
-# Regularization
-DROPOUT_RATE = 0.4  
-WEIGHT_DECAY = 1e-4  
 
 # Create necessary directories
 import os
