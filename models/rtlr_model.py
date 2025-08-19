@@ -1,126 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from typing import List, Optional
-from joblib import Parallel, delayed
 
 # Import CTCBeamDecoder with fallback
-try:
+try:  # pragma: no cover - optional dependency
     from ctcdecode import CTCBeamDecoder
     HAS_CTCDECODE = True
-except ImportError:
+except ImportError:  # pragma: no cover
     HAS_CTCDECODE = False
-    print("Warning: ctcdecode not available. Falling back to greedy decoding.")
+    print("Warning: ctcdecode not available. Beam search will fall back to greedy decoding.")
 
-# ----- Positional Encoding -----
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return x + self.pe[:x.size(0), :]
-
-# ----- CNN Backbone with Space-to-Depth -----
-class CNNBackbone(nn.Module):
-    def __init__(self, input_channels=1):
-        super().__init__()
-        self.s2d = nn.PixelUnshuffle(4)  # Output: (N, 16*input_channels, H/4, W/4)
-
-        # First special block: Conv(3x3x128) → Conv(1x1x64)
-        self.init_block = nn.Sequential(
-            nn.Conv2d(input_channels * 16, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU6(inplace=True),
-            nn.Conv2d(128, 64, kernel_size=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU6(inplace=True),
-        )
-
-        # Repeat block: Conv(3x3x512) → Conv(1x1x64)
-        def repeat_block():
-            return nn.Sequential(
-                nn.Conv2d(64, 512, kernel_size=3, padding=1),
-                nn.BatchNorm2d(512),
-                nn.ReLU6(inplace=True),
-                nn.Conv2d(512, 64, kernel_size=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU6(inplace=True),
-            )
-        self.fused_blocks = nn.Sequential(*[repeat_block() for _ in range(10)])
-
-        # Final block: reduce height to 1 and project to 256 channels
-        self.final_conv = nn.Sequential(
-            nn.Conv2d(64, 256, kernel_size=(10, 1), padding=0),  # Reduce height to 1
-            nn.BatchNorm2d(256),
-            nn.ReLU6(inplace=True),
-        )
-
-    def forward(self, x):
-        # x: (B, C, H, W)
-        x = self.s2d(x)          # (B, 16*C, H/4, W/4)
-        x = self.init_block(x)   # (B, 64, H/4, W/4)
-        x = self.fused_blocks(x) # (B, 64, H/4, W/4)
-        x = self.final_conv(x)   # (B, 256, 1, W/4)
-        x = x.squeeze(2)         # (B, 256, W/4)
-        x = x.permute(0, 2, 1)   # (B, W/4, 256)
-        return x
-
-# ----- Transformer Encoder Block -----
-class TransformerEncoderBlock(nn.Module):
-    def __init__(self, d_model=256, nhead=4, dim_feedforward=1024, dropout=0.1):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(dim_feedforward, d_model),
-        )
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, src_key_padding_mask=None):
-        x2 = self.norm1(x)
-        attn_output, _ = self.attn(x2, x2, x2, key_padding_mask=src_key_padding_mask)
-        x = x + self.dropout(attn_output)
-        x2 = self.norm2(x)
-        x = x + self.dropout(self.ffn(x2))
-        return x
-
-# ----- Transformer Encoder with 16 Layers -----
-class SelfAttentionEncoder(nn.Module):
-    def __init__(self, d_model=256, num_layers=16, nhead=4, dim_feedforward=1024, dropout=0.1):
-        super().__init__()
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.layers = nn.ModuleList([
-            TransformerEncoderBlock(d_model, nhead, dim_feedforward, dropout) for _ in range(num_layers)
-        ])
-
-    def forward(self, x, src_key_padding_mask=None):
-        x = self.pos_encoder(x)
-        for layer in self.layers:
-            x = layer(x, src_key_padding_mask)
-        return x
-
-# ----- CTC Decoder Head -----
-class CTCDecoderHead(nn.Module):
-    def __init__(self, d_model, vocab_size):
-        super().__init__()
-        self.output_layer = nn.Linear(d_model, vocab_size + 1)  # +1 for blank
-
-    def forward(self, x):
-        # CRITICAL FIX: Return raw logits, not log_softmax
-        # The loss function will handle the softmax/log_softmax
-        return self.output_layer(x)  # (B, T, V+1) - raw logits
+################################################################################
+# Active Model: CNN + BiLSTM + Linear (CTC)
+################################################################################
 
 # ----- Full Model -----    
 class CTCRecognitionModel(nn.Module):
@@ -130,7 +22,7 @@ class CTCRecognitionModel(nn.Module):
         self.chunk_width = chunk_width
         self.pad = pad
         
-        # Enhanced CNN backbone
+    # CNN backbone (kept simple & efficient)
         self.cnn = nn.Sequential(
             # First conv block
             nn.Conv2d(1, 64, kernel_size=3, padding=1),  # Increase channels
@@ -200,6 +92,9 @@ class CTCRecognitionModel(nn.Module):
         return output
 
 # ----- PyctcDecode CTC Beam Decoder Wrapper (for inference) -----
+################################################################################
+# Beam Search / LM Wrapper
+################################################################################
 class PyCTCBeamDecoder:
     def __init__(self, labels, model_path=None, alpha=0.5, beta=1.0, cutoff_top_n=40, cutoff_prob=1.0, beam_width=100, num_processes=4, blank_id=0, log_probs_input=False):
         if HAS_CTCDECODE:
@@ -273,66 +168,52 @@ class CTCDecoder(nn.Module):
         seq_lens = torch.full((probs.size(0),), probs.size(1), dtype=torch.long)
         
         beam_results, beam_scores, timesteps, out_seq_len = self.beam_decoder.decode(probs, seq_lens)
-        
-        # Convert results to strings
+
         decoded_strings = []
         if beam_results is not None:
-            for beam_result in beam_results:
-                # Take the best beam (first one)
-                indices = beam_result[0][:out_seq_len[0][0]]
-                decoded_string = ''.join([self.labels[idx] for idx in indices if idx < len(self.labels)])
-                decoded_strings.append(decoded_string)
-        else:
-            # Fallback to simple greedy decoding
+            # beam_results: (B, beam_width, max_len) ; out_seq_len: (B, beam_width)
+            for b in range(len(beam_results)):
+                best_len = out_seq_len[b][0] if out_seq_len is not None else len(beam_results[b][0])
+                indices = beam_results[b][0][:best_len]
+                decoded = []
+                prev = None
+                for idx in indices:
+                    idx_val = int(idx)
+                    if idx_val != self.blank_id and idx_val != prev and idx_val < len(self.labels):
+                        decoded.append(self.labels[idx_val])
+                    prev = idx_val
+                decoded_strings.append(''.join(decoded))
+        else:  # Greedy fallback
             for prob in probs:
                 indices = torch.argmax(prob, dim=-1)
                 decoded = []
                 prev = None
                 for idx in indices:
-                    if idx != self.blank_id and idx != prev:
-                        if idx < len(self.labels):
-                            decoded.append(self.labels[idx])
-                    prev = idx
+                    idx_val = int(idx)
+                    if idx_val != self.blank_id and idx_val != prev and idx_val < len(self.labels):
+                        decoded.append(self.labels[idx_val])
+                    prev = idx_val
                 decoded_strings.append(''.join(decoded))
-        
+
         return decoded_strings
 
 class CTCBeamDecoderWrapper:
+    """Simplified greedy fallback decoder (kept for compatibility)."""
     def __init__(self, vocab, beam_width=10):
         self.vocab = vocab
-        self.beam_width = beam_width
-        self.blank_id = 0  # Assuming blank is at index 0
-        
+        self.blank_id = 0
+
     def decode(self, log_probs_batch):
-        """
-        Decode batch of log probabilities to text
-        
-        Args:
-            log_probs_batch: torch.Tensor of shape (B, T, V+1) with log probabilities
-            
-        Returns:
-            List of decoded strings
-        """
         batch_size = log_probs_batch.size(0)
-        decoded_texts = []
-        
+        texts = []
         for b in range(batch_size):
-            log_probs = log_probs_batch[b]  # (T, V+1)
-            
-            # Greedy decoding (can be replaced with beam search later)
-            pred_indices = torch.argmax(log_probs, dim=-1)  # (T,)
-            
-            # Remove consecutive duplicates and blanks
-            decoded_sequence = []
-            prev_idx = None
-            
-            for idx in pred_indices:
-                idx = idx.item()
-                if idx != self.blank_id and idx != prev_idx:
-                    if idx > 0 and idx <= len(self.vocab):  # Valid character index
-                        decoded_sequence.append(self.vocab[idx-1])  # -1 because blank is at 0
-                prev_idx = idx
-            
-            decoded_texts.append(''.join(decoded_sequence))
-        
-        return decoded_texts
+            preds = torch.argmax(log_probs_batch[b], dim=-1)
+            seq = []
+            prev = None
+            for idx in preds:
+                idx_val = int(idx)
+                if idx_val != self.blank_id and idx_val != prev and 0 < idx_val <= len(self.vocab):
+                    seq.append(self.vocab[idx_val-1])
+                prev = idx_val
+            texts.append(''.join(seq))
+        return texts
