@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, List
 import time
 from .metrics import calculate_cer, calculate_word_accuracy, calculate_sequence_accuracy, greedy_decode
+from models.rtlr_model import CTCDecoder  # LM / beam decoder
 from .early_stopping import EarlyStopping
 
 def train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config, scheduler=None):
@@ -58,6 +59,16 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     
     training_start_time = time.time()
     
+    # Optional beam decoder (only for validation to save time)
+    beam_decoder = None
+    if getattr(config, 'USE_LANGUAGE_MODEL', False):
+        try:
+            beam_decoder = CTCDecoder(labels=converter.vocab, beam_width=getattr(config, 'BEAM_WIDTH', 50), lm_path=getattr(config, 'LM_MODEL_PATH', None), alpha=getattr(config, 'LM_ALPHA', 0.5), beta=getattr(config, 'LM_BETA', 1.0))
+            print("Beam decoder initialized.")
+        except Exception as e:
+            print(f"Beam decoder init failed, falling back to greedy: {e}")
+            beam_decoder = None
+
     for epoch in range(config.EPOCHS):
         epoch_start_time = time.time()
         
@@ -66,7 +77,7 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         
         # Validation phase
         if epoch % config.EVAL_STEP == 0:
-            val_metrics = evaluate_model(model, val_dataloader, converter, criterion, device)
+            val_metrics = evaluate_model(model, val_dataloader, converter, criterion, device, beam_decoder=beam_decoder)
             
             # Print comprehensive metrics
             print_metrics(epoch + 1, config.EPOCHS, train_metrics, val_metrics, time.time() - epoch_start_time)
@@ -313,10 +324,10 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
         print(f"\n🔍 Debug after epoch {epoch + 1}:")
         from .debug_helpers import check_convergence_issues, debug_model_output
         check_convergence_issues(model)
-        # Get a sample from the current batch
-        sample_images = images[:1] if 'images' in locals() else [next(iter(train_dataloader))[0][0]]
-        sample_texts = texts[:1] if 'texts' in locals() else [next(iter(train_dataloader))[1][0]]
-        debug_model_output(model, (sample_images, sample_texts, [len(sample_texts[0])]), converter, device)
+        if 'images' in locals() and 'texts' in locals():
+            sample_images = images[:1]
+            sample_texts = texts[:1]
+            debug_model_output(model, (sample_images, sample_texts, [len(sample_texts[0])]), converter, device)
     
     return {
         'loss': avg_loss,
@@ -325,7 +336,7 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
         'samples': total_samples
     }
 
-def evaluate_model(model, dataloader, converter, criterion, device) -> Dict[str, float]:
+def evaluate_model(model, dataloader, converter, criterion, device, beam_decoder=None) -> Dict[str, float]:
     """Comprehensive evaluation with all metrics"""
     model.eval()
     
@@ -368,8 +379,14 @@ def evaluate_model(model, dataloader, converter, criterion, device) -> Dict[str,
                         total_loss += loss.item()
                         total_samples += 1
                         
-                        # Decode prediction
-                        pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
+                        # Decode prediction (beam if available)
+                        if beam_decoder is not None:
+                            with torch.no_grad():
+                                # beam decoder expects log_probs in (B,T,V) log space -> convert to probs
+                                probs = torch.exp(log_probs.permute(1,0,2))  # (1,T,V)
+                                pred_texts = beam_decoder.decode(torch.log(probs + 1e-8))  # reuse interface
+                        else:
+                            pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
                         all_predictions.extend(pred_texts)
                         all_targets.append(text)
                 
