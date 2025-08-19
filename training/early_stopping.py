@@ -57,7 +57,8 @@ class EarlyStopping:
             self.best = current
             self.wait = 0
             if self.restore_best_weights and model is not None:
-                self.best_weights = model.state_dict().copy()
+                # Deep copy tensors to avoid in-place mutation during further training steps
+                self.best_weights = {k: v.detach().clone() for k, v in model.state_dict().items()}
             if self.verbose:
                 print(f"🎯 New best metric: {current:.4f}")
         else:
