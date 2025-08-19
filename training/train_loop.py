@@ -5,7 +5,8 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, List
 import time
 from .metrics import calculate_cer, calculate_word_accuracy, calculate_sequence_accuracy, greedy_decode
-from models.rtlr_model import CTCDecoder  # LM / beam decoder
+# LM / beam decoder placeholder (to be reintroduced later)
+CTCDecoder = None  # type: ignore
 from .early_stopping import EarlyStopping
 
 def train_model(model, train_dataloader, val_dataloader, converter, device, optimizer, config, scheduler=None):
@@ -17,12 +18,16 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         param.requires_grad = True
     
     criterion = nn.CTCLoss(blank=0, zero_infinity=True, reduction='mean')
+    use_amp = bool(getattr(config, 'MIXED_PRECISION', False) and device.type == 'cuda')
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    grad_accum = max(1, int(getattr(config, 'GRAD_ACCUM_STEPS', 1)))
     
     # Create directories for saving models
     os.makedirs(config.SAVE_DIR, exist_ok=True)
     os.makedirs(config.BEST_MODEL_DIR, exist_ok=True)
     
     best_metric = 0.0 if config.EVAL_STRATEGY == "accuracy" else float('inf')
+    best_val_loss = float('inf')  # Always track best validation loss separately
     saved_checkpoints = []
     
     # Initialize early stopping
@@ -59,6 +64,21 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     
     training_start_time = time.time()
     
+    # Optional OneCycleLR override (creates per-step scheduler)
+    if getattr(config, 'USE_ONECYCLE', False):
+        steps_per_epoch = max(1, len(train_dataloader))
+        total_steps = steps_per_epoch * config.EPOCHS
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=getattr(config, 'ONECYCLE_MAX_LR', optimizer.param_groups[0]['lr']),
+            total_steps=total_steps,
+            pct_start=getattr(config, 'ONECYCLE_PCT_START', 0.15),
+            div_factor=getattr(config, 'ONECYCLE_DIV_FACTOR', 25.0),
+            final_div_factor=getattr(config, 'ONECYCLE_FINAL_DIV_FACTOR', 100.0),
+            anneal_strategy='cos'
+        )
+        print(f"OneCycleLR enabled: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}")
+
     # Optional beam decoder (only for validation to save time)
     beam_decoder = None
     if getattr(config, 'USE_LANGUAGE_MODEL', False):
@@ -71,9 +91,9 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
 
     for epoch in range(config.EPOCHS):
         epoch_start_time = time.time()
-        
+
         # Training phase
-        train_metrics = train_epoch(model, train_dataloader, converter, device, optimizer, criterion, epoch, config)
+        train_metrics = train_epoch(model, train_dataloader, converter, device, optimizer, criterion, epoch, config, scheduler if getattr(config, 'USE_ONECYCLE', False) else None, scaler=scaler, use_amp=use_amp, grad_accum=grad_accum)
         
         # Validation phase
         if epoch % config.EVAL_STEP == 0:
@@ -84,6 +104,9 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
             
             # Save best model based on evaluation strategy
             current_metric = val_metrics['accuracy'] if config.EVAL_STRATEGY == "accuracy" else val_metrics['loss']
+            # Track best validation loss always
+            if val_metrics['loss'] < best_val_loss:
+                best_val_loss = val_metrics['loss']
             is_best = False
             
             if config.EVAL_STRATEGY == "accuracy" and current_metric > best_metric:
@@ -126,187 +149,150 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
         save_checkpoint(model, optimizer, epoch, train_metrics['loss'], config, saved_checkpoints)
         
         # Update learning rate scheduler
-        if scheduler is not None:
+        if scheduler is not None and not getattr(config, 'USE_ONECYCLE', False):
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                # ReduceLROnPlateau needs validation metric
                 scheduler.step(val_metrics['cer'])
-                print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
             else:
-                # Time-based schedulers
                 scheduler.step()
-                print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         print("-" * 80)
     
     # Training completed
     total_training_time = time.time() - training_start_time
     
-    if early_stopping is not None and early_stopping.wait < early_stopping.patience:
-        print(f"\n🎉 Training completed normally after {epoch + 1} epochs")
-        print(f"   Final {config.EVAL_STRATEGY}: {current_metric:.4f}")
-        print(f"   Best {config.EVAL_STRATEGY}: {early_stopping.get_best_metric():.4f}")
-    else:
-        print(f"\n🎉 Training completed after {config.EPOCHS} epochs")
-    
-    print(f"⏱️ Total training time: {total_training_time/3600:.1f} hours ({total_training_time/60:.1f} minutes)")
+    print("\n================ Training Summary ================")
+    print(f"Epochs run: {epoch + 1}")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    if early_stopping is not None:
+        print(f"Best validation CER (early stopping metric): {early_stopping.get_best_metric():.2f}%")
+    print(f"Final epoch validation loss: {val_metrics['loss']:.4f}")
+    print(f"Final epoch validation CER: {val_metrics['cer']:.2f}%")
+    print(f"Final epoch validation accuracy: {val_metrics['accuracy']:.2f}%")
+    print(f"Total training time: {total_training_time/3600:.2f} hours ({total_training_time/60:.1f} minutes)")
+    print("=================================================")
     
     return model
 
-def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoch: int, config) -> Dict[str, float]:
-    """Train for one epoch and return metrics"""
+def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoch: int, config, scheduler=None, scaler=None, use_amp: bool=False, grad_accum: int=1) -> Dict[str, float]:
+    """Train for one epoch and return metrics.
+    Includes mixed precision, grad accumulation, and throughput logging."""
     model.train()
     
     total_loss = 0.0
     total_samples = 0
     all_predictions = []
     all_targets = []
+    max_batches = getattr(config, 'MAX_BATCHES_PER_EPOCH', None)
+    log_interval = getattr(config, 'LOG_INTERVAL', 10)
+    batch_start = time.time()
+    token_count = 0
     
     for batch_idx, (images, texts, text_lengths) in enumerate(dataloader):
-        optimizer.zero_grad()
-        batch_losses = []
-        batch_predictions = []
-        batch_targets = []
-        
-        for img_idx, (img, text) in enumerate(zip(images, texts)):
-            try:
-                # Prepare input
-                img = img.unsqueeze(0).to(device)
-                img.requires_grad_(True)
-                
-                # Prepare labels
-                encoded = converter.encode([text])[0]
-                if len(encoded) == 0:
-                    continue
-                
-                if isinstance(encoded, torch.Tensor):
-                    labels_np = encoded.detach().cpu().numpy()
-                    labels_tensor = torch.from_numpy(labels_np).long().to(device)
-                else:
-                    labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
-                
-                if labels_tensor.dim() > 1:
-                    labels_tensor = labels_tensor.flatten()
-                
-                label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
-                
-                # Forward pass
-                logits = model(img)  # (1, T, V+1) where T depends on image width
-                
-                # Debug: Print sample details for less batches
-                if batch_idx < 1 and img_idx == 0:  # Only first batch
-                    print(f"\n🔍 Sample Debug (Batch {batch_idx}):")
-                    print(f"   Image shape: {img.shape}")
-                    print(f"   Logits shape: {logits.shape}")
-                    print(f"   Text: '{text}' (len: {len(text)})")
-                    print(f"   Encoded: {encoded} (len: {len(encoded)})")
-                    print(f"   Logits range: [{logits.min().item():.3f}, {logits.max().item():.3f}]")
-                    print(f"   Logits std: {logits.std().item():.3f}")
-                
-                # Verify gradients are flowing
-                if not logits.requires_grad:
-                    print(f"Warning: Model output still doesn't require grad in batch {batch_idx}, sample {img_idx}")
-                    continue
-                
-                # Validate input/label alignment
-                if logits.size(1) < len(labels_tensor):
-                    print(f"⚠️ Sequence too long: input_len={logits.size(1)}, target_len={len(labels_tensor)}")
-                    continue
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+        optimizer.zero_grad(set_to_none=True)
 
-                # Also add minimum sequence length check
-                if logits.size(1) < 2:  # CTC needs at least 2 time steps
-                    print(f"⚠️ Sequence too short: {logits.size(1)} time steps")
-                    continue
-                
-                # CTC expects log probabilities in (T, B, V+1) format
-                log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)  # (T, 1, V+1)
-                
-                # Input lengths (sequence length for the single image)
-                input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
-                
-                # Debug CTC inputs for first few samples
-                if batch_idx < 3 and img_idx == 0:
-                    print(f"   CTC Input length: {input_length.item()}")
-                    print(f"   Target length: {label_length.item()}")
-                    print(f"   Log probs shape: {log_probs.shape}")
-                    print(f"   Log probs range: [{log_probs.min().item():.3f}, {log_probs.max().item():.3f}]")
-                
-                # Validate tensor shapes before CTC loss
-                if log_probs.size(0) == 0 or labels_tensor.size(0) == 0:
-                    print(f"Empty sequence detected in batch {batch_idx}, sample {img_idx}")
-                    continue
-                
-                # Check if input sequence is long enough for target
-                if input_length.item() < label_length.item():
-                    print(f"⚠️ Sequence too short: input_len={input_length.item()}, target_len={label_length.item()}")
-                    continue
-                
-                # Calculate CTC loss
-                loss = criterion(log_probs, labels_tensor, input_length, label_length)
-                
-                # Debug loss for first few samples
-                if batch_idx < 3 and img_idx == 0:
-                    print(f"   CTC Loss: {loss.item():.4f}")
-                
-                if torch.isnan(loss) or torch.isinf(loss):
-                    continue
-                
-                # Backward pass
-                loss.backward()
-                batch_losses.append(loss.item())
-                
-                # Debug gradients for first few batches
-                if batch_idx < 3 and img_idx == 0:
-                    total_grad_norm = 0
-                    for name, param in model.named_parameters():
-                        if param.grad is not None:
-                            param_norm = param.grad.data.norm(2)
-                            total_grad_norm += param_norm.item() ** 2
-                    total_grad_norm = total_grad_norm ** (1. / 2)
-                    print(f"   Total gradient norm: {total_grad_norm:.6f}")
-                
-                # Decode for metrics (every 10th batch to save computation)
-                if batch_idx % 10 == 0:
-                    with torch.no_grad():
-                        pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
-                        batch_predictions.extend(pred_texts)
-                        batch_targets.append(text)
-                
-                # Quick decode check for first few samples
-                if batch_idx == 0 and img_idx == 0:  # Only first sample of first batch
-                    with torch.no_grad():
-                        sample_decoded = greedy_decode(log_probs.permute(1, 0, 2), converter)
-                        print(f"📝 Sample decode: '{sample_decoded[0][:50]}...' (target: '{text[:50]}...')")
-                
-            except Exception as e:
-                if batch_idx < 3:  # Only print first few errors
-                    print(f"Error in batch {batch_idx}, sample {img_idx}: {e}")
+        if getattr(model, 'supports_batch_ctc', False):
+            # Batched path for paper model
+            widths = [img.shape[-1] for img in images]
+            max_w = max(widths)
+            padded_imgs = []
+            for img in images:
+                if img.shape[-1] < max_w:
+                    pad_w = max_w - img.shape[-1]
+                    img = F.pad(img, (0, pad_w, 0, 0))
+                padded_imgs.append(img.unsqueeze(0))
+            batch_imgs = torch.cat(padded_imgs, dim=0).to(device)
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                logits = model(batch_imgs)
+                log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
+            input_lengths = torch.full((logits.size(0),), logits.size(1), dtype=torch.long, device=device)
+            encoded = converter.encode(texts)
+            target_lengths = torch.tensor([e.numel() for e in encoded], device=device, dtype=torch.long)
+            targets = torch.cat(encoded).to(device) if encoded else torch.tensor([], dtype=torch.long, device=device)
+            if targets.numel() == 0:
                 continue
-        
-        # Update weights with gradient scaling
-        if batch_losses:
-            # Scale gradients if they're too small
-            total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            
-            # Check if gradients are too small
-            if total_grad_norm < 0.1:
-                # Scale up gradients
-                for param in model.parameters():
-                    if param.grad is not None:
-                        param.grad.data *= 2.0
-            
-            optimizer.step()
-            
-            avg_batch_loss = sum(batch_losses) / len(batch_losses)
-            total_loss += avg_batch_loss * len(batch_losses)
-            total_samples += len(batch_losses)
-            
-            # Collect predictions for metrics
-            all_predictions.extend(batch_predictions)
-            all_targets.extend(batch_targets)
-            
-            if batch_idx % 20 == 0:
-                print(f"Epoch {epoch+1}, Batch {batch_idx:3d}, Loss: {avg_batch_loss:.4f}, "
-                      f"Processed: {len(batch_losses)}/{len(images)}")
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                loss = criterion(log_probs, targets, input_lengths, target_lengths) / grad_accum
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+            if use_amp:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+            if (batch_idx + 1) % grad_accum == 0:
+                if use_amp:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                if use_amp:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                if scheduler is not None and getattr(config, 'USE_ONECYCLE', False):
+                    scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+            total_loss += loss.item() * grad_accum
+            total_samples += 1
+            token_count += int(target_lengths.sum().item())
+            if batch_idx % log_interval == 0:
+                with torch.no_grad():
+                    preds = greedy_decode(log_probs.permute(1, 0, 2), converter)
+                    all_predictions.extend(preds[:len(texts)])
+                    all_targets.extend(texts)
+                elapsed = time.time() - batch_start
+                tps = token_count / elapsed if elapsed > 0 else 0.0
+                print(f"Epoch {epoch+1}, Batch {batch_idx:3d}, Loss: {loss.item()*grad_accum:.4f}, B={len(texts)}, tokens/s={tps:.1f}, seq_len={logits.size(1)}")
+                batch_start = time.time(); token_count = 0
+        else:
+            # Original per-sample path
+            batch_losses = []
+            batch_predictions = []
+            batch_targets = []
+            for img_idx, (img, text) in enumerate(zip(images, texts)):
+                try:
+                    img = img.unsqueeze(0).to(device)
+                    img.requires_grad_(True)
+                    encoded = converter.encode([text])[0]
+                    if len(encoded) == 0:
+                        continue
+                    if isinstance(encoded, torch.Tensor):
+                        labels_tensor = encoded.long().to(device)
+                    else:
+                        labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
+                    if labels_tensor.dim() > 1:
+                        labels_tensor = labels_tensor.flatten()
+                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
+                    logits = model(img)
+                    if logits.size(1) < len(labels_tensor) or logits.size(1) < 2:
+                        continue
+                    log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
+                    input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
+                    loss = criterion(log_probs, labels_tensor, input_length, label_length)
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        continue
+                    loss.backward()
+                    batch_losses.append(loss.item())
+                    if batch_idx % 10 == 0:
+                        with torch.no_grad():
+                            pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
+                            batch_predictions.extend(pred_texts)
+                            batch_targets.append(text)
+                except Exception:
+                    continue
+            if batch_losses:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
+                if scheduler is not None and getattr(config, 'USE_ONECYCLE', False):
+                    scheduler.step()
+                avg_batch_loss = sum(batch_losses) / len(batch_losses)
+                total_loss += avg_batch_loss * len(batch_losses)
+                total_samples += len(batch_losses)
+                all_predictions.extend(batch_predictions)
+                all_targets.extend(batch_targets)
+                if batch_idx % 20 == 0:
+                    print(f"Epoch {epoch+1}, Batch {batch_idx:3d}, Loss: {avg_batch_loss:.4f}, Processed: {len(batch_losses)}/{len(images)}")
     
     # Calculate epoch metrics
     avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
@@ -347,51 +333,66 @@ def evaluate_model(model, dataloader, converter, criterion, device, beam_decoder
     
     with torch.no_grad():
         for batch_idx, (images, texts, text_lengths) in enumerate(dataloader):
-            for img, text in zip(images, texts):
-                try:
-                    img = img.unsqueeze(0).to(device)
-                    
-                    # Prepare labels
-                    encoded = converter.encode([text])[0]
-                    if len(encoded) == 0:
-                        continue
-                    
-                    if isinstance(encoded, torch.Tensor):
-                        labels_np = encoded.detach().cpu().numpy()
-                        labels_tensor = torch.from_numpy(labels_np).long().to(device)
-                    else:
-                        labels_tensor = torch.tensor(encoded, dtype=torch.long, device=device)
-                    
-                    if labels_tensor.dim() > 1:
-                        labels_tensor = labels_tensor.flatten()
-                    
-                    label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
-                    
-                    # Forward pass
-                    logits = model(img)
-                    log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
-                    input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
-                    
-                    # Calculate loss
-                    loss = criterion(log_probs, labels_tensor, input_length, label_length)
-                    
-                    if not (torch.isnan(loss) or torch.isinf(loss)):
-                        total_loss += loss.item()
-                        total_samples += 1
-                        
-                        # Decode prediction (beam if available)
+            if getattr(model, 'supports_batch_ctc', False):
+                # Vectorized path
+                widths = [img.shape[-1] for img in images]
+                max_w = max(widths)
+                padded = []
+                for img in images:
+                    if img.shape[-1] < max_w:
+                        pad_w = max_w - img.shape[-1]
+                        img = F.pad(img, (0, pad_w, 0, 0))
+                    padded.append(img.unsqueeze(0))
+                batch_imgs = torch.cat(padded, dim=0).to(device)
+                logits = model(batch_imgs)  # (B,T,V)
+                log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
+                input_lengths = torch.full((logits.size(0),), logits.size(1), dtype=torch.long, device=device)
+                encoded = converter.encode(texts)
+                target_lengths = torch.tensor([e.numel() for e in encoded], device=device, dtype=torch.long)
+                if sum(t.item() for t in target_lengths) == 0:
+                    continue
+                targets = torch.cat(encoded).to(device)
+                loss = criterion(log_probs, targets, input_lengths, target_lengths)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
+                total_loss += loss.item()
+                total_samples += 1
+                # Decode
+                if beam_decoder is not None:
+                    probs = torch.exp(log_probs.permute(1, 0, 2))
+                    pred_texts = beam_decoder.decode(torch.log(probs + 1e-8))
+                else:
+                    pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
+                all_predictions.extend(pred_texts[:len(texts)])
+                all_targets.extend(texts)
+            else:
+                # Fallback per-sample path
+                for img, text in zip(images, texts):
+                    try:
+                        img = img.unsqueeze(0).to(device)
+                        encoded = converter.encode([text])[0]
+                        if len(encoded) == 0:
+                            continue
+                        labels_tensor = encoded.long().to(device) if isinstance(encoded, torch.Tensor) else torch.tensor(encoded, dtype=torch.long, device=device)
+                        if labels_tensor.dim() > 1:
+                            labels_tensor = labels_tensor.flatten()
+                        label_length = torch.tensor([len(labels_tensor)], dtype=torch.long, device=device)
+                        logits = model(img)
+                        log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
+                        input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
+                        loss = criterion(log_probs, labels_tensor, input_length, label_length)
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            continue
+                        total_loss += loss.item(); total_samples += 1
                         if beam_decoder is not None:
-                            with torch.no_grad():
-                                # beam decoder expects log_probs in (B,T,V) log space -> convert to probs
-                                probs = torch.exp(log_probs.permute(1,0,2))  # (1,T,V)
-                                pred_texts = beam_decoder.decode(torch.log(probs + 1e-8))  # reuse interface
+                            probs = torch.exp(log_probs.permute(1, 0, 2))
+                            pred_texts = beam_decoder.decode(torch.log(probs + 1e-8))
                         else:
                             pred_texts = greedy_decode(log_probs.permute(1, 0, 2), converter)
                         all_predictions.extend(pred_texts)
                         all_targets.append(text)
-                
-                except Exception as e:
-                    continue
+                    except Exception:
+                        continue
     
     # Calculate metrics
     avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')

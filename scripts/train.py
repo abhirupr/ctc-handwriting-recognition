@@ -8,7 +8,7 @@ from torch.optim import SGD, AdamW
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset.iam_dataset import IAMDataset
-from models.rtlr_model import CTCRecognitionModel
+from models.model import CTCTransformerModel
 from utils.label_converter import LabelConverter
 from training.train_loop import train_model
 from training.metrics import calculate_cer, calculate_word_accuracy
@@ -47,8 +47,13 @@ val_dataset = IAMDataset(DATA_DIR, XML_PATH, samples=val_samples,
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
-# Initialize model
-model = CTCRecognitionModel(**MODEL_CONFIG)
+pm = config.PAPER_MODEL
+model = CTCTransformerModel(vocab_size=MODEL_CONFIG['vocab_size'],
+                            depth=pm.get('depth', 16),
+                            dropout=pm.get('dropout', 0.1),
+                            chunk_width=pm.get('chunk_width', 320),
+                            pad=pm.get('pad', 32))
+print("Using model: CTCTransformerModel (paper-aligned)")
 
 # Select optimizer
 if OPTIMIZER == "sgd":
