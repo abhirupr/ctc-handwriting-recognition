@@ -55,9 +55,13 @@ class IAMDataset(Dataset):
                     print(f"Parsed {len(file_samples)} samples from {xml_file}")
                     samples.extend(file_samples)
                 
-                # Stop early for debugging if we have enough samples
-                if len(samples) >= 1000:  # Increased limit for better training
-                    print(f"Stopping early after collecting {len(samples)} samples for debugging")
+                # Optional cap controlled via config (import lazily to avoid circular)
+                try:
+                    from config import MAX_DATASET_SAMPLES
+                except Exception:
+                    MAX_DATASET_SAMPLES = None
+                if MAX_DATASET_SAMPLES is not None and len(samples) >= MAX_DATASET_SAMPLES:
+                    print(f"Reached MAX_DATASET_SAMPLES={MAX_DATASET_SAMPLES}, stopping XML parse early")
                     break
         else:
             # If it's a single file
