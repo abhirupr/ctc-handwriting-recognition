@@ -2,7 +2,7 @@
 
 # Handwriting Line Recognition (IAM) – Transformer CTC
 
-Model implementation inspired by the paper:
+Model implementation of the paper:
 
 **"Rethinking Text Line Recognition Models"** – <https://arxiv.org/abs/2104.07787>
 
