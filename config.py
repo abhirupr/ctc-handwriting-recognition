@@ -91,6 +91,16 @@ MIXED_PRECISION = True            # Use torch.cuda.amp for faster training on GP
 GRAD_ACCUM_STEPS = 1              # Set >1 to simulate larger batch size
 LOG_INTERVAL = 1 if FAST_DEV_RUN else 10  # Batches between log lines
 
+# Dataset parsing cache (speeds up subsequent runs)
+DATASET_CACHE = True
+DATASET_CACHE_FILE = "data/iam_dataset/parsed_samples_cache.pkl"
+
+# Training heuristics (no architecture change)
+CTC_LABEL_SMOOTH = 0.05          # 0.0 disables (applied to log probs before CTCLoss)
+WARMUP_STEPS = 1500              # Linear LR warmup steps (ignored if USE_ONECYCLE)
+GRAD_NORM_LOG_INTERVAL = 200     # Global steps between grad norm reports
+MAX_GRAD_NORM = 5.0              # Clip threshold (already applied; exposed for tuning)
+
 # Data augmentation
 DATA_AUGMENTATION = {
     "enabled": True,
