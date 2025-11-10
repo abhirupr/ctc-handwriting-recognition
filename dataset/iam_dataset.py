@@ -1,4 +1,5 @@
 import os
+import pickle
 import xml.etree.ElementTree as ET
 from PIL import Image
 from torch.utils.data import Dataset
@@ -10,7 +11,33 @@ class IAMDataset(Dataset):
         if samples is not None:
             self.samples = samples
         else:
-            self.samples = self.parse_xml(xml_path)
+            # Optional caching
+            use_cache = False
+            cache_path = None
+            try:
+                from config import DATASET_CACHE, DATASET_CACHE_FILE
+                use_cache = bool(DATASET_CACHE)
+                cache_path = DATASET_CACHE_FILE
+            except Exception:
+                pass
+            if use_cache and cache_path and os.path.exists(cache_path):
+                try:
+                    with open(cache_path, 'rb') as f:
+                        self.samples = pickle.load(f)
+                    print(f"Loaded {len(self.samples)} samples from cache: {cache_path}")
+                except Exception as e:
+                    print(f"Cache load failed ({e}); reparsing XML.")
+                    self.samples = self.parse_xml(xml_path)
+            else:
+                self.samples = self.parse_xml(xml_path)
+                if use_cache and cache_path:
+                    try:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with open(cache_path, 'wb') as f:
+                            pickle.dump(self.samples, f)
+                        print(f"Cached parsed samples to {cache_path}")
+                    except Exception as e:
+                        print(f"Failed to write cache ({e})")
         print(f"Loaded {len(self.samples)} samples from dataset")
         
         # Fixed transform - removed None parameter and improved error handling
