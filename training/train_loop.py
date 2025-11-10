@@ -89,11 +89,31 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
             print(f"Beam decoder init failed, falling back to greedy: {e}")
             beam_decoder = None
 
+    # Track global optimization steps (after optimizer.step()) for warmup & logging
+    global_step = 0
+    # Stash base lr for warmup (if not already present)
+    for pg in optimizer.param_groups:
+        pg.setdefault('initial_lr', pg['lr'])
+
     for epoch in range(config.EPOCHS):
         epoch_start_time = time.time()
 
         # Training phase
-        train_metrics = train_epoch(model, train_dataloader, converter, device, optimizer, criterion, epoch, config, scheduler if getattr(config, 'USE_ONECYCLE', False) else None, scaler=scaler, use_amp=use_amp, grad_accum=grad_accum)
+        train_metrics, global_step = train_epoch(
+            model,
+            train_dataloader,
+            converter,
+            device,
+            optimizer,
+            criterion,
+            epoch,
+            config,
+            scheduler if getattr(config, 'USE_ONECYCLE', False) else None,
+            scaler=scaler,
+            use_amp=use_amp,
+            grad_accum=grad_accum,
+            global_step=global_step
+        )
         
         # Validation phase
         if epoch % config.EVAL_STEP == 0:
@@ -174,9 +194,9 @@ def train_model(model, train_dataloader, val_dataloader, converter, device, opti
     
     return model
 
-def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoch: int, config, scheduler=None, scaler=None, use_amp: bool=False, grad_accum: int=1) -> Dict[str, float]:
-    """Train for one epoch and return metrics.
-    Includes mixed precision, grad accumulation, and throughput logging."""
+def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoch: int, config, scheduler=None, scaler=None, use_amp: bool=False, grad_accum: int=1, global_step: int = 0) -> Tuple[Dict[str, float], int]:
+    """Train for one epoch and return (metrics, updated_global_step).
+    Adds: label smoothing for CTC, linear LR warmup, grad norm logging, configurable clipping."""
     model.train()
     
     total_loss = 0.0
@@ -188,6 +208,11 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
     batch_start = time.time()
     token_count = 0
     
+    max_grad_norm = float(getattr(config, 'MAX_GRAD_NORM', 5.0))
+    label_smooth = float(getattr(config, 'CTC_LABEL_SMOOTH', 0.0))
+    warmup_steps = int(getattr(config, 'WARMUP_STEPS', 0)) if not getattr(config, 'USE_ONECYCLE', False) else 0
+    grad_norm_log_interval = int(getattr(config, 'GRAD_NORM_LOG_INTERVAL', 0))
+
     for batch_idx, (images, texts, text_lengths) in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
             break
@@ -213,6 +238,12 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
             targets = torch.cat(encoded).to(device) if encoded else torch.tensor([], dtype=torch.long, device=device)
             if targets.numel() == 0:
                 continue
+            # Label smoothing (convert log_probs -> probs, smooth, back to log) keeping gradients
+            if label_smooth > 0.0:
+                probs = log_probs.exp()
+                vocab = probs.size(-1)
+                probs = (1.0 - label_smooth) * probs + label_smooth / vocab
+                log_probs = probs.clamp_min(1e-12).log()
             with torch.cuda.amp.autocast(enabled=use_amp):
                 loss = criterion(log_probs, targets, input_lengths, target_lengths) / grad_accum
             if torch.isnan(loss) or torch.isinf(loss):
@@ -224,12 +255,28 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
             if (batch_idx + 1) % grad_accum == 0:
                 if use_amp:
                     scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                # Compute grad norm (pre-clip)
+                if grad_norm_log_interval > 0 and (global_step % grad_norm_log_interval == 0):
+                    total_norm = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm **= 0.5
+                    print(f"GradNorm (pre-clip) @ step {global_step}: {total_norm:.2f}")
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                # Linear warmup (adjust lr before stepping scaler/optimizer)
+                if warmup_steps > 0 and global_step < warmup_steps:
+                    warm_scale = float(global_step + 1) / float(max(1, warmup_steps))
+                    for pg in optimizer.param_groups:
+                        base_lr = pg.get('initial_lr', pg['lr'])
+                        pg['lr'] = base_lr * warm_scale
                 if use_amp:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     optimizer.step()
+                global_step += 1
                 if scheduler is not None and getattr(config, 'USE_ONECYCLE', False):
                     scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -269,6 +316,12 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                         continue
                     log_probs = F.log_softmax(logits, dim=2).permute(1, 0, 2)
                     input_length = torch.tensor([logits.size(1)], dtype=torch.long, device=device)
+                    # (Per-sample path) optional label smoothing (retain gradients)
+                    if label_smooth > 0.0:
+                        probs = log_probs.exp()
+                        vocab = probs.size(-1)
+                        probs = (1.0 - label_smooth) * probs + label_smooth / vocab
+                        log_probs = probs.clamp_min(1e-12).log()
                     loss = criterion(log_probs, labels_tensor, input_length, label_length)
                     if torch.isnan(loss) or torch.isinf(loss):
                         continue
@@ -282,10 +335,11 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
                 except Exception:
                     continue
             if batch_losses:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                 optimizer.step()
                 if scheduler is not None and getattr(config, 'USE_ONECYCLE', False):
                     scheduler.step()
+                global_step += 1
                 avg_batch_loss = sum(batch_losses) / len(batch_losses)
                 total_loss += avg_batch_loss * len(batch_losses)
                 total_samples += len(batch_losses)
@@ -315,12 +369,12 @@ def train_epoch(model, dataloader, converter, device, optimizer, criterion, epoc
             sample_texts = texts[:1]
             debug_model_output(model, (sample_images, sample_texts, [len(sample_texts[0])]), converter, device)
     
-    return {
+    return ({
         'loss': avg_loss,
         'cer': train_cer,
         'accuracy': train_accuracy,
         'samples': total_samples
-    }
+    }, global_step)
 
 def evaluate_model(model, dataloader, converter, criterion, device, beam_decoder=None) -> Dict[str, float]:
     """Comprehensive evaluation with all metrics"""
